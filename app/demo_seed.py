@@ -7,21 +7,7 @@ def ensure_demo_data() -> None:
     with get_connection() as connection:
         existing_teacher = connection.execute("SELECT COUNT(*) FROM teachers").fetchone()[0]
         if existing_teacher:
-            connection.execute(
-                """
-                UPDATE students
-                SET email = CASE roll_number
-                    WHEN '07A01' THEN 'asha.verma@student.demo'
-                    WHEN '07A02' THEN 'rohan.gupta@student.demo'
-                    WHEN '07A03' THEN 'meera.khan@student.demo'
-                    WHEN '07A04' THEN 'ishaan.rao@student.demo'
-                    WHEN '07B01' THEN 'kavya.singh@student.demo'
-                    WHEN '07B02' THEN 'dev.malhotra@student.demo'
-                    ELSE email
-                END
-                WHERE email IS NULL OR email = ''
-                """
-            )
+            _ensure_expanded_demo_school_data(connection)
             _ensure_demo_blueprints(connection)
             connection.commit()
             return
@@ -381,7 +367,164 @@ def ensure_demo_data() -> None:
             blueprint_rows,
         )
 
+        _ensure_expanded_demo_school_data(connection)
+        _ensure_demo_blueprints(connection)
         connection.commit()
+
+
+def _ensure_expanded_demo_school_data(connection) -> None:
+    teacher_row = connection.execute(
+        "SELECT id, school_id FROM teachers ORDER BY id LIMIT 1"
+    ).fetchone()
+    if not teacher_row:
+        return
+
+    teacher_id = teacher_row["id"]
+    school_id = teacher_row["school_id"]
+
+    subject_mediums = {
+        "Science": "English",
+        "Math": "English + Hindi",
+        "English": "English",
+        "Social Science": "English + Hindi",
+    }
+    subject_chapters = {
+        "Science": [
+            ("SCI-CH-01", "Nutrition in Plants", "Term 1"),
+            ("SCI-CH-02", "Heat", "Term 1"),
+            ("SCI-CH-03", "Motion and Time", "Term 2"),
+        ],
+        "Math": [
+            ("MTH-CH-01", "Integers", "Term 1"),
+            ("MTH-CH-02", "Fractions and Decimals", "Term 1"),
+            ("MTH-CH-03", "Simple Equations", "Term 2"),
+        ],
+        "English": [
+            ("ENG-CH-01", "Three Questions", "Term 1"),
+            ("ENG-CH-02", "A Gift of Chappals", "Term 1"),
+            ("ENG-CH-03", "Gopal and the Hilsa-Fish", "Term 2"),
+        ],
+        "Social Science": [
+            ("SST-CH-01", "On Equality", "Term 1"),
+            ("SST-CH-02", "Role of the Government in Health", "Term 1"),
+            ("SST-CH-03", "How the State Government Works", "Term 2"),
+        ],
+    }
+    roster = [
+        ("07A01", "Asha Verma", "asha.verma@student.demo", "Hindi", "Needs visual reinforcement"),
+        ("07A02", "Rohan Gupta", "rohan.gupta@student.demo", "English", ""),
+        ("07A03", "Meera Khan", "meera.khan@student.demo", "English + Hindi", "Slow processing speed"),
+        ("07A04", "Ishaan Rao", "ishaan.rao@student.demo", "English", ""),
+        ("07A05", "Priya Nair", "priya.nair@student.demo", "English", ""),
+        ("07A06", "Arjun Mehta", "arjun.mehta@student.demo", "Hindi", ""),
+        ("07A07", "Sana Sheikh", "sana.sheikh@student.demo", "English + Hindi", ""),
+        ("07A08", "Vivaan Joshi", "vivaan.joshi@student.demo", "English", ""),
+        ("07A09", "Ananya Das", "ananya.das@student.demo", "English", "Prefers short instructions"),
+        ("07A10", "Kabir Ali", "kabir.ali@student.demo", "Hindi", ""),
+    ]
+
+    class_rows = connection.execute(
+        """
+        SELECT id, subject
+        FROM classes
+        WHERE teacher_id = ? AND academic_year = '2026-27' AND grade = '7' AND section = 'A'
+        ORDER BY CASE WHEN subject = 'Science' THEN 0 ELSE 1 END, id
+        """,
+        (teacher_id,),
+    ).fetchall()
+    if class_rows:
+        canonical_class_id = class_rows[0]["id"]
+        connection.execute(
+            "UPDATE classes SET medium = ? WHERE id = ?",
+            ("English", canonical_class_id),
+        )
+    else:
+        canonical_class_id = connection.execute(
+            """
+            INSERT INTO classes (school_id, teacher_id, academic_year, grade, section, subject, medium)
+            VALUES (?, ?, '2026-27', '7', 'A', 'Science', 'English')
+            """,
+            (school_id, teacher_id),
+        ).lastrowid
+
+    for subject, medium in subject_mediums.items():
+        connection.execute(
+            """
+            INSERT INTO class_subjects (class_id, subject, medium)
+            VALUES (?, ?, ?)
+            ON CONFLICT(class_id, subject) DO UPDATE SET medium = excluded.medium
+            """,
+            (canonical_class_id, subject, medium),
+        )
+
+    for roll_number, full_name, email, preferred_language, accessibility_notes in roster:
+        existing_student = connection.execute(
+            """
+            SELECT id
+            FROM students
+            WHERE class_id = ? AND roll_number = ?
+            LIMIT 1
+            """,
+            (canonical_class_id, roll_number),
+        ).fetchone()
+        if existing_student:
+            connection.execute(
+                """
+                UPDATE students
+                SET full_name = ?, email = ?, preferred_language = ?, accessibility_notes = ?, status = 'active'
+                WHERE id = ?
+                """,
+                (full_name, email, preferred_language, accessibility_notes, existing_student["id"]),
+            )
+        else:
+            connection.execute(
+                """
+                INSERT INTO students (
+                    school_id, class_id, roll_number, full_name, email, preferred_language, accessibility_notes, status
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, 'active')
+                """,
+                (school_id, canonical_class_id, roll_number, full_name, email, preferred_language, accessibility_notes),
+            )
+
+    duplicate_rows = [row for row in class_rows if row["id"] != canonical_class_id]
+    for duplicate_row in duplicate_rows:
+        assessment_count = connection.execute(
+            "SELECT COUNT(*) FROM assessments WHERE class_id = ?",
+            (duplicate_row["id"],),
+        ).fetchone()[0]
+        if assessment_count:
+            continue
+        connection.execute("DELETE FROM classes WHERE id = ?", (duplicate_row["id"],))
+
+    for subject, chapters in subject_chapters.items():
+        for chapter_code, chapter_name, term in chapters:
+            existing_chapter = connection.execute(
+                """
+                SELECT id
+                FROM chapters
+                WHERE board_type = 'CBSE' AND grade = '7' AND subject = ? AND chapter_code = ?
+                LIMIT 1
+                """,
+                (subject, chapter_code),
+            ).fetchone()
+            if existing_chapter:
+                connection.execute(
+                    """
+                    UPDATE chapters
+                    SET chapter_name = ?, term = ?
+                    WHERE id = ?
+                    """,
+                    (chapter_name, term, existing_chapter["id"]),
+                )
+            else:
+                connection.execute(
+                    """
+                    INSERT INTO chapters (board_type, grade, subject, chapter_code, chapter_name, term)
+                    VALUES ('CBSE', '7', ?, ?, ?, ?)
+                    """,
+                    (subject, chapter_code, chapter_name, term),
+                )
 
 
 def _ensure_demo_blueprints(connection) -> None:

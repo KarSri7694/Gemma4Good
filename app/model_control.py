@@ -18,6 +18,11 @@ class ModelSamplingConfig:
     auto_grade_poll_interval_seconds: int = 15
     max_agent_iterations: int = 10
     show_reasoning: bool = True
+    embedding_model_server: str = "http://127.0.0.1:8081"
+    embedding_model_name: str = "embedding-model"
+    rag_chunk_target_tokens: int = 750
+    rag_chunk_overlap_tokens: int = 150
+    rag_top_k: int = 5
 
 
 def load_model_sampling_config(path: Path = MODEL_CONTROL_PATH) -> ModelSamplingConfig:
@@ -38,6 +43,11 @@ def load_model_sampling_config(path: Path = MODEL_CONTROL_PATH) -> ModelSampling
         auto_grade_poll_interval_seconds=int(values.get("AUTO_GRADE_POLL_INTERVAL_SECONDS", "15")),
         max_agent_iterations=int(values.get("MAX_AGENT_ITERATIONS", "10")),
         show_reasoning=values.get("SHOW_REASONING", "true").strip().lower() in {"1", "true", "yes", "on"},
+        embedding_model_server=values.get("EMBEDDING_MODEL_SERVER", "http://127.0.0.1:8081").strip(),
+        embedding_model_name=values.get("EMBEDDING_MODEL_NAME", "embedding-model").strip(),
+        rag_chunk_target_tokens=int(values.get("RAG_CHUNK_TARGET_TOKENS", "750")),
+        rag_chunk_overlap_tokens=int(values.get("RAG_CHUNK_OVERLAP_TOKENS", "150")),
+        rag_top_k=int(values.get("RAG_TOP_K", "5")),
     )
 
 

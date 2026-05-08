@@ -29,7 +29,7 @@ class LlamaServerClient:
     def completion(
         self,
         *,
-        prompt: str,
+        prompt: Any,
         temperature: float | None = None,
         top_p: float | None = None,
         top_k: int | None = None,
@@ -133,7 +133,16 @@ class LlamaServerClient:
             json=payload,
             timeout=self.config.timeout_seconds,
         )
-        response.raise_for_status()
+        if not response.ok:
+            body = ""
+            try:
+                body = response.text.strip()
+            except Exception:
+                body = ""
+            message = f"{response.status_code} Client Error for url: {response.url}"
+            if body:
+                message = f"{message} | Response body: {body}"
+            raise requests.HTTPError(message, response=response)
         return response.json()
 
     def _post_stream(self, path: str, payload: dict[str, Any]):

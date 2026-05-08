@@ -20,6 +20,76 @@ def get_teacher() -> dict[str, Any] | None:
     return dict(row) if row else None
 
 
+def create_class_for_teacher(
+    *,
+    teacher_id: int,
+    academic_year: str,
+    grade: str,
+    section: str,
+    subject: str,
+    medium: str,
+) -> int:
+    with get_connection() as connection:
+        teacher_row = connection.execute(
+            "SELECT school_id FROM teachers WHERE id = ?",
+            (teacher_id,),
+        ).fetchone()
+        if not teacher_row:
+            raise ValueError("Teacher not found.")
+        class_id = connection.execute(
+            """
+            INSERT INTO classes (school_id, teacher_id, academic_year, grade, section, subject, medium)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                teacher_row["school_id"],
+                teacher_id,
+                academic_year.strip(),
+                grade.strip(),
+                section.strip(),
+                subject.strip(),
+                medium.strip(),
+            ),
+        ).lastrowid
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO class_subjects (class_id, subject, medium)
+            VALUES (?, ?, ?)
+            """,
+            (class_id, subject.strip(), medium.strip()),
+        )
+        connection.commit()
+    return int(class_id)
+
+
+def update_class_details(
+    *,
+    class_id: int,
+    academic_year: str,
+    grade: str,
+    section: str,
+    subject: str,
+    medium: str,
+) -> None:
+    with get_connection() as connection:
+        connection.execute(
+            """
+            UPDATE classes
+            SET academic_year = ?, grade = ?, section = ?, subject = ?, medium = ?
+            WHERE id = ?
+            """,
+            (
+                academic_year.strip(),
+                grade.strip(),
+                section.strip(),
+                subject.strip(),
+                medium.strip(),
+                class_id,
+            ),
+        )
+        connection.commit()
+
+
 def list_teacher_classes(teacher_id: int) -> list[dict[str, Any]]:
     with get_connection() as connection:
         rows = connection.execute(
@@ -31,6 +101,14 @@ def list_teacher_classes(teacher_id: int) -> list[dict[str, Any]]:
                 c.subject,
                 c.medium,
                 c.academic_year,
+                COALESCE(
+                    (SELECT COUNT(*) FROM class_subjects cs WHERE cs.class_id = c.id),
+                    0
+                ) AS subject_count,
+                COALESCE(
+                    (SELECT GROUP_CONCAT(cs.subject, ', ') FROM class_subjects cs WHERE cs.class_id = c.id),
+                    c.subject
+                ) AS subjects_csv,
                 COUNT(DISTINCT s.id) AS student_count,
                 COUNT(DISTINCT a.id) AS assessment_count
             FROM classes c
@@ -56,6 +134,14 @@ def get_class_overview(class_id: int) -> dict[str, Any]:
                 c.subject,
                 c.medium,
                 c.academic_year,
+                COALESCE(
+                    (SELECT COUNT(*) FROM class_subjects cs WHERE cs.class_id = c.id),
+                    0
+                ) AS subject_count,
+                COALESCE(
+                    (SELECT GROUP_CONCAT(cs.subject, ', ') FROM class_subjects cs WHERE cs.class_id = c.id),
+                    c.subject
+                ) AS subjects_csv,
                 COUNT(DISTINCT s.id) AS student_count,
                 COUNT(DISTINCT a.id) AS assessment_count,
                 ROUND(AVG(sa.percentage), 1) AS avg_percentage
@@ -82,7 +168,22 @@ def list_class_students(class_id: int) -> list[dict[str, Any]]:
                 s.preferred_language,
                 s.accessibility_notes,
                 ROUND(AVG(sa.percentage), 1) AS avg_percentage,
-                SUM(CASE WHEN scm.status = 'lagging' THEN 1 ELSE 0 END) AS lagging_concepts
+                SUM(CASE WHEN scm.status = 'lagging' THEN 1 ELSE 0 END) AS lagging_concepts,
+                (
+                    SELECT COUNT(*)
+                    FROM attendance_records ar
+                    WHERE ar.student_id = s.id
+                ) AS attendance_days_recorded,
+                (
+                    SELECT COUNT(*)
+                    FROM attendance_records ar
+                    WHERE ar.student_id = s.id AND ar.status = 'present'
+                ) AS attendance_days_present,
+                (
+                    SELECT MIN(ar.attendance_date)
+                    FROM attendance_records ar
+                    WHERE ar.student_id = s.id
+                ) AS attendance_started_on
             FROM students s
             LEFT JOIN student_assessments sa ON sa.student_id = s.id
             LEFT JOIN student_concept_mastery scm ON scm.student_id = s.id AND scm.class_id = s.class_id
@@ -92,7 +193,323 @@ def list_class_students(class_id: int) -> list[dict[str, Any]]:
             """,
             (class_id,),
         ).fetchall()
+    items = []
+    for row in rows:
+        item = dict(row)
+        recorded = item.get("attendance_days_recorded") or 0
+        present = item.get("attendance_days_present") or 0
+        item["attendance_percentage"] = round((present / recorded) * 100, 1) if recorded else None
+        items.append(item)
+    return items
+
+
+def list_class_roster(class_id: int) -> list[dict[str, Any]]:
+    with get_connection() as connection:
+        rows = connection.execute(
+            """
+            SELECT id, roll_number, full_name, preferred_language
+            FROM students
+            WHERE class_id = ? AND status = 'active'
+            ORDER BY roll_number
+            """,
+            (class_id,),
+        ).fetchall()
     return [dict(row) for row in rows]
+
+
+def list_inactive_class_students(class_id: int) -> list[dict[str, Any]]:
+    with get_connection() as connection:
+        rows = connection.execute(
+            """
+            SELECT id, roll_number, full_name, preferred_language
+            FROM students
+            WHERE class_id = ? AND status = 'inactive'
+            ORDER BY roll_number
+            """,
+            (class_id,),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def list_class_subjects(class_id: int) -> list[dict[str, Any]]:
+    with get_connection() as connection:
+        rows = connection.execute(
+            """
+            SELECT id, class_id, subject, medium
+            FROM class_subjects
+            WHERE class_id = ?
+            ORDER BY subject
+            """,
+            (class_id,),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def list_grade_curriculum_subjects(grade: str) -> list[dict[str, Any]]:
+    with get_connection() as connection:
+        rows = connection.execute(
+            """
+            SELECT id, board_type, grade, subject, default_medium, created_at, updated_at
+            FROM curriculum_subjects
+            WHERE grade = ?
+            ORDER BY subject
+            """,
+            (grade.strip(),),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def get_curriculum_subject(*, grade: str, subject: str) -> dict[str, Any] | None:
+    with get_connection() as connection:
+        row = connection.execute(
+            """
+            SELECT id, board_type, grade, subject, default_medium, created_at, updated_at
+            FROM curriculum_subjects
+            WHERE grade = ? AND LOWER(subject) = LOWER(?)
+            LIMIT 1
+            """,
+            (grade.strip(), subject.strip()),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def ensure_curriculum_subject(
+    *,
+    board_type: str,
+    grade: str,
+    subject: str,
+    default_medium: str = "",
+) -> int:
+    with get_connection() as connection:
+        connection.execute(
+            """
+            INSERT INTO curriculum_subjects (board_type, grade, subject, default_medium)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(board_type, grade, subject) DO UPDATE SET
+                default_medium = COALESCE(NULLIF(excluded.default_medium, ''), curriculum_subjects.default_medium),
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (board_type.strip(), grade.strip(), subject.strip(), default_medium.strip()),
+        )
+        row = connection.execute(
+            """
+            SELECT id
+            FROM curriculum_subjects
+            WHERE board_type = ? AND grade = ? AND subject = ?
+            LIMIT 1
+            """,
+            (board_type.strip(), grade.strip(), subject.strip()),
+        ).fetchone()
+        if row:
+            class_rows = connection.execute(
+                """
+                SELECT id
+                FROM classes
+                WHERE grade = ?
+                """,
+                (grade.strip(),),
+            ).fetchall()
+            for class_row in class_rows:
+                connection.execute(
+                    """
+                    INSERT INTO class_subjects (class_id, subject, medium)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(class_id, subject) DO UPDATE SET
+                        medium = COALESCE(NULLIF(excluded.medium, ''), class_subjects.medium)
+                    """,
+                    (class_row["id"], subject.strip(), default_medium.strip()),
+                )
+            connection.commit()
+            return int(row["id"])
+        connection.commit()
+    raise ValueError("Unable to create or resolve curriculum subject.")
+
+
+def upsert_curriculum_chapters(
+    *,
+    curriculum_subject_id: int,
+    board_type: str,
+    grade: str,
+    subject: str,
+    chapters: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    created_rows: list[dict[str, Any]] = []
+    with get_connection() as connection:
+        for index, chapter in enumerate(chapters, start=1):
+            chapter_code = (chapter.get("chapter_code") or f"{subject[:3].upper()}-{grade}-{index:02d}").strip()
+            chapter_name = (chapter.get("chapter_name") or f"Chapter {index}").strip()
+            term = str(chapter.get("term") or "").strip()
+            chapter_order = int(chapter.get("chapter_order") or index)
+            connection.execute(
+                """
+                INSERT INTO curriculum_chapters (
+                    curriculum_subject_id, chapter_code, chapter_name, chapter_order, term
+                )
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(curriculum_subject_id, chapter_code) DO UPDATE SET
+                    chapter_name = excluded.chapter_name,
+                    chapter_order = excluded.chapter_order,
+                    term = excluded.term,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                (curriculum_subject_id, chapter_code, chapter_name, chapter_order, term),
+            )
+            connection.execute(
+                """
+                INSERT INTO chapters (board_type, grade, subject, chapter_code, chapter_name, term)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(board_type, grade, subject, chapter_code) DO UPDATE SET
+                    chapter_name = excluded.chapter_name,
+                    term = excluded.term
+                """,
+                (board_type.strip(), grade.strip(), subject.strip(), chapter_code, chapter_name, term),
+            )
+            row = connection.execute(
+                """
+                SELECT id, chapter_code, chapter_name, chapter_order, term
+                FROM curriculum_chapters
+                WHERE curriculum_subject_id = ? AND chapter_code = ?
+                LIMIT 1
+                """,
+                (curriculum_subject_id, chapter_code),
+            ).fetchone()
+            if row:
+                created_rows.append(dict(row))
+        connection.commit()
+    return created_rows
+
+
+def list_curriculum_chapters(curriculum_subject_id: int) -> list[dict[str, Any]]:
+    with get_connection() as connection:
+        rows = connection.execute(
+            """
+            SELECT id, chapter_code, chapter_name, chapter_order, term, created_at, updated_at
+            FROM curriculum_chapters
+            WHERE curriculum_subject_id = ?
+            ORDER BY COALESCE(chapter_order, 9999), chapter_name
+            """,
+            (curriculum_subject_id,),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def add_subject_to_class(
+    *,
+    class_id: int,
+    subject: str,
+    medium: str = "",
+) -> int:
+    with get_connection() as connection:
+        cursor = connection.execute(
+            """
+            INSERT INTO class_subjects (class_id, subject, medium)
+            VALUES (?, ?, ?)
+            """,
+            (class_id, subject.strip(), medium.strip()),
+        )
+        connection.commit()
+    return int(cursor.lastrowid)
+
+
+def update_class_subject_details(
+    *,
+    class_subject_id: int,
+    subject: str,
+    medium: str = "",
+) -> None:
+    with get_connection() as connection:
+        connection.execute(
+            """
+            UPDATE class_subjects
+            SET subject = ?, medium = ?
+            WHERE id = ?
+            """,
+            (subject.strip(), medium.strip(), class_subject_id),
+        )
+        connection.commit()
+
+
+def add_student_to_class(
+    *,
+    class_id: int,
+    roll_number: str,
+    full_name: str,
+    email: str = "",
+    preferred_language: str = "",
+    accessibility_notes: str = "",
+) -> int:
+    with get_connection() as connection:
+        class_row = connection.execute(
+            "SELECT school_id FROM classes WHERE id = ?",
+            (class_id,),
+        ).fetchone()
+        if not class_row:
+            raise ValueError("Class not found.")
+        student_id = connection.execute(
+            """
+            INSERT INTO students (
+                school_id, class_id, roll_number, full_name, email, preferred_language, accessibility_notes, status
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, 'active')
+            """,
+            (
+                class_row["school_id"],
+                class_id,
+                roll_number.strip(),
+                full_name.strip(),
+                email.strip(),
+                preferred_language.strip(),
+                accessibility_notes.strip(),
+            ),
+        ).lastrowid
+        connection.commit()
+    return int(student_id)
+
+
+def update_student_details(
+    *,
+    student_id: int,
+    roll_number: str,
+    full_name: str,
+    email: str = "",
+    preferred_language: str = "",
+    accessibility_notes: str = "",
+) -> None:
+    with get_connection() as connection:
+        connection.execute(
+            """
+            UPDATE students
+            SET roll_number = ?, full_name = ?, email = ?, preferred_language = ?, accessibility_notes = ?
+            WHERE id = ?
+            """,
+            (
+                roll_number.strip(),
+                full_name.strip(),
+                email.strip(),
+                preferred_language.strip(),
+                accessibility_notes.strip(),
+                student_id,
+            ),
+        )
+        connection.commit()
+
+
+def deactivate_student(student_id: int) -> None:
+    with get_connection() as connection:
+        connection.execute(
+            "UPDATE students SET status = 'inactive' WHERE id = ?",
+            (student_id,),
+        )
+        connection.commit()
+
+
+def reactivate_student(student_id: int) -> None:
+    with get_connection() as connection:
+        connection.execute(
+            "UPDATE students SET status = 'active' WHERE id = ?",
+            (student_id,),
+        )
+        connection.commit()
 
 
 def list_class_assessments(class_id: int) -> list[dict[str, Any]]:
@@ -122,6 +539,267 @@ def list_class_assessments(class_id: int) -> list[dict[str, Any]]:
             (class_id,),
         ).fetchall()
     return [dict(row) for row in rows]
+
+
+def create_chapter_for_class(
+    *,
+    class_id: int,
+    subject: str,
+    chapter_code: str,
+    chapter_name: str,
+    term: str = "",
+) -> int:
+    with get_connection() as connection:
+        class_row = connection.execute(
+            """
+            SELECT c.grade, s.board_type
+            FROM classes c
+            JOIN schools s ON s.id = c.school_id
+            WHERE c.id = ?
+            """,
+            (class_id,),
+        ).fetchone()
+        if not class_row:
+            raise ValueError("Class not found.")
+        chapter_id = connection.execute(
+            """
+            INSERT INTO chapters (board_type, grade, subject, chapter_code, chapter_name, term)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                class_row["board_type"],
+                class_row["grade"],
+                subject.strip(),
+                chapter_code.strip(),
+                chapter_name.strip(),
+                term.strip(),
+            ),
+        ).lastrowid
+        connection.commit()
+    return int(chapter_id)
+
+
+def update_chapter_details(
+    *,
+    chapter_id: int,
+    chapter_code: str,
+    chapter_name: str,
+    term: str = "",
+) -> None:
+    with get_connection() as connection:
+        connection.execute(
+            """
+            UPDATE chapters
+            SET chapter_code = ?, chapter_name = ?, term = ?
+            WHERE id = ?
+            """,
+            (
+                chapter_code.strip(),
+                chapter_name.strip(),
+                term.strip(),
+                chapter_id,
+            ),
+        )
+        connection.commit()
+
+
+def delete_chapter_if_unused(chapter_id: int) -> tuple[bool, str]:
+    with get_connection() as connection:
+        assessment_row = connection.execute(
+            "SELECT COUNT(*) AS count FROM assessments WHERE chapter_id = ?",
+            (chapter_id,),
+        ).fetchone()
+        assessment_count = int(assessment_row["count"]) if assessment_row else 0
+        if assessment_count > 0:
+            return False, "Chapter is linked to existing assessments and cannot be deleted safely."
+
+        connection.execute("DELETE FROM concepts WHERE chapter_id = ?", (chapter_id,))
+        cursor = connection.execute("DELETE FROM chapters WHERE id = ?", (chapter_id,))
+        connection.commit()
+    if cursor.rowcount:
+        return True, "Chapter deleted."
+    return False, "Chapter not found."
+
+
+def upsert_class_attendance(
+    *,
+    class_id: int,
+    teacher_id: int,
+    attendance_date: str,
+    absent_student_ids: list[int],
+    source: str,
+    raw_model_output: str = "",
+) -> dict[str, Any]:
+    roster = list_class_roster(class_id)
+    absent_id_set = set(absent_student_ids)
+    if not roster:
+        return {
+            "attendance_date": attendance_date,
+            "present_count": 0,
+            "absent_count": 0,
+            "records": [],
+        }
+
+    records: list[dict[str, Any]] = []
+    with get_connection() as connection:
+        for student in roster:
+            status = "absent" if student["id"] in absent_id_set else "present"
+            connection.execute(
+                """
+                INSERT INTO attendance_records (
+                    class_id, student_id, teacher_id, attendance_date, status, source, raw_model_output
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(class_id, student_id, attendance_date) DO UPDATE SET
+                    teacher_id = excluded.teacher_id,
+                    status = excluded.status,
+                    source = excluded.source,
+                    raw_model_output = excluded.raw_model_output,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                (
+                    class_id,
+                    student["id"],
+                    teacher_id,
+                    attendance_date,
+                    status,
+                    source,
+                    raw_model_output,
+                ),
+            )
+            records.append(
+                {
+                    "student_id": student["id"],
+                    "roll_number": student["roll_number"],
+                    "full_name": student["full_name"],
+                    "status": status,
+                }
+            )
+        connection.commit()
+
+    absent_records = [item for item in records if item["status"] == "absent"]
+    return {
+        "attendance_date": attendance_date,
+        "present_count": len(records) - len(absent_records),
+        "absent_count": len(absent_records),
+        "records": records,
+        "absent_students": absent_records,
+    }
+
+
+def list_attendance_for_date(class_id: int, attendance_date: str) -> list[dict[str, Any]]:
+    with get_connection() as connection:
+        rows = connection.execute(
+            """
+            SELECT
+                ar.student_id,
+                s.roll_number,
+                s.full_name,
+                ar.status,
+                ar.source,
+                ar.updated_at
+            FROM attendance_records ar
+            JOIN students s ON s.id = ar.student_id
+            WHERE ar.class_id = ? AND ar.attendance_date = ?
+            ORDER BY s.roll_number
+            """,
+            (class_id, attendance_date),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def get_attendance_overview(class_id: int, attendance_date: str) -> dict[str, Any]:
+    rows = list_attendance_for_date(class_id, attendance_date)
+    absent_count = sum(1 for row in rows if row["status"] == "absent")
+    present_count = sum(1 for row in rows if row["status"] == "present")
+    return {
+        "attendance_date": attendance_date,
+        "present_count": present_count,
+        "absent_count": absent_count,
+        "total_students": len(rows),
+    }
+
+
+def get_class_attendance_stats(class_id: int) -> dict[int, dict[str, Any]]:
+    with get_connection() as connection:
+        rows = connection.execute(
+            """
+            SELECT
+                s.id AS student_id,
+                COUNT(ar.id) AS attendance_days_recorded,
+                SUM(CASE WHEN ar.status = 'present' THEN 1 ELSE 0 END) AS attendance_days_present,
+                MIN(ar.attendance_date) AS attendance_started_on,
+                MAX(ar.attendance_date) AS attendance_last_marked_on
+            FROM students s
+            LEFT JOIN attendance_records ar ON ar.student_id = s.id AND ar.class_id = s.class_id
+            WHERE s.class_id = ? AND s.status = 'active'
+            GROUP BY s.id
+            """,
+            (class_id,),
+        ).fetchall()
+    stats: dict[int, dict[str, Any]] = {}
+    for row in rows:
+        item = dict(row)
+        recorded = item.get("attendance_days_recorded") or 0
+        present = item.get("attendance_days_present") or 0
+        item["attendance_percentage"] = round((present / recorded) * 100, 1) if recorded else None
+        stats[int(item["student_id"])] = item
+    return stats
+
+
+def update_student_attendance_status(
+    *,
+    class_id: int,
+    student_id: int,
+    teacher_id: int,
+    attendance_date: str,
+    status: str,
+    source: str = "manual",
+    raw_model_output: str = "",
+) -> None:
+    with get_connection() as connection:
+        connection.execute(
+            """
+            INSERT INTO attendance_records (
+                class_id, student_id, teacher_id, attendance_date, status, source, raw_model_output
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(class_id, student_id, attendance_date) DO UPDATE SET
+                teacher_id = excluded.teacher_id,
+                status = excluded.status,
+                source = excluded.source,
+                raw_model_output = excluded.raw_model_output,
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (class_id, student_id, teacher_id, attendance_date, status, source, raw_model_output),
+        )
+        connection.commit()
+
+
+def clear_student_attendance(student_id: int, class_id: int | None = None) -> int:
+    with get_connection() as connection:
+        if class_id is None:
+            cursor = connection.execute(
+                "DELETE FROM attendance_records WHERE student_id = ?",
+                (student_id,),
+            )
+        else:
+            cursor = connection.execute(
+                "DELETE FROM attendance_records WHERE student_id = ? AND class_id = ?",
+                (student_id, class_id),
+            )
+        connection.commit()
+    return cursor.rowcount
+
+
+def clear_class_attendance(class_id: int) -> int:
+    with get_connection() as connection:
+        cursor = connection.execute(
+            "DELETE FROM attendance_records WHERE class_id = ?",
+            (class_id,),
+        )
+        connection.commit()
+    return cursor.rowcount
 
 
 def list_class_concept_gaps(class_id: int) -> list[dict[str, Any]]:
@@ -154,6 +832,7 @@ def get_student_detail(student_id: int) -> dict[str, Any]:
                 s.id,
                 s.full_name,
                 s.roll_number,
+                s.email,
                 s.preferred_language,
                 s.accessibility_notes,
                 c.grade,
@@ -227,11 +906,65 @@ def get_student_detail(student_id: int) -> dict[str, Any]:
             (student_id,),
         ).fetchall()
 
+        attendance_summary = connection.execute(
+            """
+            SELECT
+                COUNT(*) AS attendance_days_recorded,
+                SUM(CASE WHEN status = 'present' THEN 1 ELSE 0 END) AS attendance_days_present,
+                MIN(attendance_date) AS attendance_started_on,
+                MAX(attendance_date) AS attendance_last_marked_on
+            FROM attendance_records
+            WHERE student_id = ?
+            """,
+            (student_id,),
+        ).fetchone()
+
+        attendance_history = connection.execute(
+            """
+            SELECT attendance_date, status, source, updated_at
+            FROM attendance_records
+            WHERE student_id = ?
+            ORDER BY attendance_date DESC
+            LIMIT 60
+            """,
+            (student_id,),
+        ).fetchall()
+
+        adaptation_profiles = connection.execute(
+            """
+            SELECT subject, profile_json, summary, generated_by_model,
+                   based_on_assessments, last_submission_at, updated_at
+            FROM student_adaptation_profiles
+            WHERE student_id = ?
+            ORDER BY subject
+            """,
+            (student_id,),
+        ).fetchall()
+
+    attendance_summary_dict = dict(attendance_summary) if attendance_summary else {}
+    attendance_days_recorded = attendance_summary_dict.get("attendance_days_recorded") or 0
+    attendance_days_present = attendance_summary_dict.get("attendance_days_present") or 0
     return {
         "student": dict(student) if student else None,
         "mastery": [dict(row) for row in mastery_rows],
         "assessments": [dict(row) for row in assessments],
         "recommendations": [dict(row) for row in recommendations],
+        "attendance_summary": {
+            **attendance_summary_dict,
+            "attendance_percentage": (
+                round((attendance_days_present / attendance_days_recorded) * 100, 1)
+                if attendance_days_recorded
+                else None
+            ),
+        },
+        "attendance_history": [dict(row) for row in attendance_history],
+        "adaptation_profiles": [
+            {
+                **dict(row),
+                "profile": json.loads(row["profile_json"] or "{}"),
+            }
+            for row in adaptation_profiles
+        ],
         "blueprints": [
             {
                 **dict(row),
@@ -246,7 +979,7 @@ def get_student_detail(student_id: int) -> dict[str, Any]:
     }
 
 
-def list_chapters_for_class(class_id: int) -> list[dict[str, Any]]:
+def list_chapters_for_class(class_id: int, subject: str | None = None) -> list[dict[str, Any]]:
     with get_connection() as connection:
         class_row = connection.execute(
             "SELECT grade, subject FROM classes WHERE id = ?",
@@ -255,6 +988,8 @@ def list_chapters_for_class(class_id: int) -> list[dict[str, Any]]:
         if not class_row:
             return []
 
+        resolved_subject = (subject or class_row["subject"]).strip()
+
         rows = connection.execute(
             """
             SELECT id, chapter_code, chapter_name, term
@@ -262,7 +997,198 @@ def list_chapters_for_class(class_id: int) -> list[dict[str, Any]]:
             WHERE grade = ? AND subject = ?
             ORDER BY chapter_name
             """,
-            (class_row["grade"], class_row["subject"]),
+            (class_row["grade"], resolved_subject),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def create_source_material(
+    *,
+    curriculum_subject_id: int,
+    uploaded_by_teacher_id: int,
+    title: str,
+    source_type: str,
+    original_filename: str = "",
+    mime_type: str = "",
+    storage_path: str = "",
+    raw_text: str = "",
+    extraction_summary: str = "",
+) -> int:
+    with get_connection() as connection:
+        material_id = connection.execute(
+            """
+            INSERT INTO source_materials (
+                curriculum_subject_id, uploaded_by_teacher_id, title, source_type,
+                original_filename, mime_type, storage_path, raw_text, extraction_summary
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                curriculum_subject_id,
+                uploaded_by_teacher_id,
+                title.strip(),
+                source_type.strip(),
+                original_filename.strip(),
+                mime_type.strip(),
+                storage_path.strip(),
+                raw_text,
+                extraction_summary.strip(),
+            ),
+        ).lastrowid
+        connection.commit()
+    return int(material_id)
+
+
+def update_source_material(
+    *,
+    material_id: int,
+    extraction_summary: str = "",
+    raw_text: str = "",
+) -> None:
+    with get_connection() as connection:
+        connection.execute(
+            """
+            UPDATE source_materials
+            SET extraction_summary = ?, raw_text = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (extraction_summary.strip(), raw_text, material_id),
+        )
+        connection.commit()
+
+
+def create_ingestion_run(
+    *,
+    source_material_id: int,
+    status: str,
+    extraction_summary: str = "",
+    raw_structure_json: str = "",
+    error_text: str = "",
+) -> int:
+    with get_connection() as connection:
+        run_id = connection.execute(
+            """
+            INSERT INTO material_ingestion_runs (
+                source_material_id, status, extraction_summary, raw_structure_json, error_text
+            )
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                source_material_id,
+                status.strip(),
+                extraction_summary.strip(),
+                raw_structure_json,
+                error_text,
+            ),
+        ).lastrowid
+        connection.commit()
+    return int(run_id)
+
+
+def update_ingestion_run(
+    *,
+    run_id: int,
+    status: str,
+    extraction_summary: str = "",
+    raw_structure_json: str = "",
+    error_text: str = "",
+) -> None:
+    with get_connection() as connection:
+        connection.execute(
+            """
+            UPDATE material_ingestion_runs
+            SET status = ?, extraction_summary = ?, raw_structure_json = ?, error_text = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (status.strip(), extraction_summary.strip(), raw_structure_json, error_text, run_id),
+        )
+        connection.commit()
+
+
+def replace_material_chunks(
+    *,
+    source_material_id: int,
+    curriculum_subject_id: int,
+    chunks: list[dict[str, Any]],
+) -> None:
+    with get_connection() as connection:
+        connection.execute("DELETE FROM material_chunks WHERE source_material_id = ?", (source_material_id,))
+        for index, chunk in enumerate(chunks):
+            connection.execute(
+                """
+                INSERT INTO material_chunks (
+                    source_material_id, curriculum_subject_id, chunk_index, chunk_text,
+                    page_start, page_end, section_heading, content_type, metadata_json
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    source_material_id,
+                    curriculum_subject_id,
+                    int(chunk.get("chunk_index", index)),
+                    chunk.get("chunk_text", ""),
+                    chunk.get("page_start"),
+                    chunk.get("page_end"),
+                    chunk.get("section_heading"),
+                    chunk.get("content_type", "text"),
+                    json.dumps(chunk.get("metadata", {}), ensure_ascii=False),
+                ),
+            )
+        connection.commit()
+
+
+def list_subject_materials(*, grade: str, subject: str) -> list[dict[str, Any]]:
+    with get_connection() as connection:
+        rows = connection.execute(
+            """
+            SELECT sm.id, sm.title, sm.source_type, sm.original_filename, sm.mime_type,
+                   sm.storage_path, sm.extraction_summary, sm.created_at, sm.updated_at,
+                   cur.id AS curriculum_subject_id, cur.grade, cur.subject
+            FROM source_materials sm
+            JOIN curriculum_subjects cur ON cur.id = sm.curriculum_subject_id
+            WHERE cur.grade = ? AND LOWER(cur.subject) = LOWER(?)
+            ORDER BY sm.created_at DESC
+            """,
+            (grade.strip(), subject.strip()),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def list_material_chunks_for_subject(*, grade: str, subject: str) -> list[dict[str, Any]]:
+    with get_connection() as connection:
+        rows = connection.execute(
+            """
+            SELECT mc.id, mc.source_material_id, mc.curriculum_subject_id, mc.chunk_index, mc.chunk_text,
+                   mc.page_start, mc.page_end, mc.section_heading, mc.content_type, mc.metadata_json,
+                   sm.title AS source_title
+            FROM material_chunks mc
+            JOIN curriculum_subjects cur ON cur.id = mc.curriculum_subject_id
+            JOIN source_materials sm ON sm.id = mc.source_material_id
+            WHERE cur.grade = ? AND LOWER(cur.subject) = LOWER(?)
+            ORDER BY sm.created_at DESC, mc.chunk_index ASC
+            """,
+            (grade.strip(), subject.strip()),
+        ).fetchall()
+    items: list[dict[str, Any]] = []
+    for row in rows:
+        item = dict(row)
+        item["metadata"] = json.loads(item["metadata_json"] or "{}")
+        items.append(item)
+    return items
+
+
+def list_recent_ingestion_runs(limit: int = 20) -> list[dict[str, Any]]:
+    with get_connection() as connection:
+        rows = connection.execute(
+            """
+            SELECT mir.id, mir.source_material_id, mir.status, mir.extraction_summary,
+                   mir.error_text, mir.created_at, mir.updated_at, sm.title
+            FROM material_ingestion_runs mir
+            JOIN source_materials sm ON sm.id = mir.source_material_id
+            ORDER BY mir.created_at DESC
+            LIMIT ?
+            """,
+            (limit,),
         ).fetchall()
     return [dict(row) for row in rows]
 
@@ -708,6 +1634,148 @@ def get_student_blueprint_context(student_id: int, subject: str) -> dict[str, An
     }
 
 
+def get_student_adaptation_profile_context(student_id: int, subject: str) -> dict[str, Any]:
+    with get_connection() as connection:
+        student = connection.execute(
+            """
+            SELECT s.id, s.full_name, s.roll_number, s.email, s.preferred_language,
+                   s.accessibility_notes, c.id AS class_id, c.grade, c.section, c.subject
+            FROM students s
+            JOIN classes c ON c.id = s.class_id
+            WHERE s.id = ?
+            """,
+            (student_id,),
+        ).fetchone()
+
+        mastery = connection.execute(
+            """
+            SELECT c.concept_name, ROUND(scm.mastery_score * 100, 1) AS mastery_percent,
+                   ROUND(scm.confidence_score * 100, 1) AS confidence_percent,
+                   scm.questions_attempted, scm.questions_correct, scm.status
+            FROM student_concept_mastery scm
+            JOIN concepts c ON c.id = scm.concept_id
+            JOIN classes cl ON cl.id = scm.class_id
+            WHERE scm.student_id = ? AND cl.subject = ?
+            ORDER BY scm.mastery_score ASC, c.concept_name
+            """,
+            (student_id, subject),
+        ).fetchall()
+
+        assessments = connection.execute(
+            """
+            SELECT a.title, ch.chapter_name, sa.score_obtained, sa.percentage, sa.submitted_at
+            FROM student_assessments sa
+            JOIN assessments a ON a.id = sa.assessment_id
+            JOIN classes c ON c.id = a.class_id
+            JOIN chapters ch ON ch.id = a.chapter_id
+            WHERE sa.student_id = ? AND c.subject = ?
+            ORDER BY sa.submitted_at DESC
+            """,
+            (student_id, subject),
+        ).fetchall()
+
+        answer_samples = connection.execute(
+            """
+            SELECT aq.question_text, aq.question_type, aq.correct_answer,
+                   sa.raw_answer, sa.score_awarded, sa.feedback, sa.grading_reasoning, sa.error_type
+            FROM student_answers sa
+            JOIN student_assessments sat ON sat.id = sa.student_assessment_id
+            JOIN assessments a ON a.id = sat.assessment_id
+            JOIN classes c ON c.id = a.class_id
+            JOIN assessment_questions aq ON aq.id = sa.assessment_question_id
+            WHERE sat.student_id = ? AND c.subject = ?
+            ORDER BY sat.submitted_at DESC, aq.question_number ASC
+            LIMIT 20
+            """,
+            (student_id, subject),
+        ).fetchall()
+
+        recommendations = connection.execute(
+            """
+            SELECT rr.recommendation_type, rr.recommendation_text, rr.priority, co.concept_name
+            FROM remediation_recommendations rr
+            JOIN concepts co ON co.id = rr.concept_id
+            WHERE rr.student_id = ?
+            ORDER BY rr.priority DESC, rr.created_at DESC
+            LIMIT 12
+            """,
+            (student_id,),
+        ).fetchall()
+
+        attendance_summary = connection.execute(
+            """
+            SELECT
+                COUNT(*) AS attendance_days_recorded,
+                SUM(CASE WHEN status = 'present' THEN 1 ELSE 0 END) AS attendance_days_present,
+                MIN(attendance_date) AS attendance_started_on,
+                MAX(attendance_date) AS attendance_last_marked_on
+            FROM attendance_records
+            WHERE student_id = ?
+            """,
+            (student_id,),
+        ).fetchone()
+
+    mastery_rows = [dict(row) for row in mastery]
+    answer_rows = [dict(row) for row in answer_samples]
+    recommendation_rows = [dict(row) for row in recommendations]
+    attendance_dict = dict(attendance_summary) if attendance_summary else {}
+    attendance_recorded = attendance_dict.get("attendance_days_recorded") or 0
+    attendance_present = attendance_dict.get("attendance_days_present") or 0
+
+    mcq_scores = [row["score_awarded"] for row in answer_rows if row.get("question_type") == "mcq"]
+    short_scores = [row["score_awarded"] for row in answer_rows if row.get("question_type") == "short_answer"]
+    best_formats = []
+    needs_more_support_in = []
+    if mcq_scores and (not short_scores or sum(mcq_scores) >= sum(short_scores)):
+        best_formats.append("mcq")
+    if short_scores and sum(short_scores) > sum(mcq_scores or [0]):
+        best_formats.append("short_answer")
+    if short_scores and any(score == 0 for score in short_scores):
+        needs_more_support_in.append("written explanation")
+    if mcq_scores and any(score == 0 for score in mcq_scores):
+        needs_more_support_in.append("option discrimination")
+
+    support_preferences = {
+        "preferred_language": (dict(student) if student else {}).get("preferred_language", ""),
+        "accessibility_support": (
+            [str((dict(student) if student else {}).get("accessibility_notes", "")).strip()]
+            if (dict(student) if student else {}).get("accessibility_notes")
+            else []
+        ),
+        "pace_support": (
+            "Needs slower pacing and shorter steps."
+            if (dict(student) if student else {}).get("accessibility_notes")
+            else "Use normal classroom pacing with checks for understanding."
+        ),
+        "explanation_style": ["simple explanation", "worked examples"],
+        "response_support": ["step-by-step prompting"],
+    }
+
+    return {
+        "student": dict(student) if student else None,
+        "assessment_history": [dict(row) for row in assessments],
+        "mastery_map": mastery_rows,
+        "strong_concepts": [row["concept_name"] for row in mastery_rows if row["status"] == "strong"],
+        "lagging_concepts": [row["concept_name"] for row in mastery_rows if row["status"] == "lagging"],
+        "developing_concepts": [row["concept_name"] for row in mastery_rows if row["status"] == "developing"],
+        "recent_answer_samples": answer_rows,
+        "support_preferences": support_preferences,
+        "answer_format_summary": {
+            "best_formats": best_formats,
+            "needs_more_support_in": needs_more_support_in,
+        },
+        "intervention_history": recommendation_rows,
+        "attendance_signal": {
+            **attendance_dict,
+            "attendance_percentage": (
+                round((attendance_present / attendance_recorded) * 100, 1)
+                if attendance_recorded
+                else None
+            ),
+        },
+    }
+
+
 def upsert_student_blueprint(
     *,
     student_id: int,
@@ -755,6 +1823,79 @@ def upsert_student_blueprint(
             ),
         )
         connection.commit()
+
+
+def upsert_student_adaptation_profile(
+    *,
+    student_id: int,
+    class_id: int,
+    subject: str,
+    profile: dict[str, Any],
+    summary: str,
+    generated_by_model: str,
+    based_on_assessments: int,
+    last_submission_at: str | None,
+) -> None:
+    with get_connection() as connection:
+        connection.execute(
+            """
+            INSERT INTO student_adaptation_profiles (
+                student_id, class_id, subject, profile_json, summary, generated_by_model,
+                based_on_assessments, last_submission_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(student_id, class_id, subject) DO UPDATE SET
+                profile_json = excluded.profile_json,
+                summary = excluded.summary,
+                generated_by_model = excluded.generated_by_model,
+                based_on_assessments = excluded.based_on_assessments,
+                last_submission_at = excluded.last_submission_at,
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (
+                student_id,
+                class_id,
+                subject,
+                json.dumps(profile, ensure_ascii=False),
+                summary,
+                generated_by_model,
+                based_on_assessments,
+                last_submission_at,
+            ),
+        )
+        connection.commit()
+
+
+def get_student_adaptation_profile(student_id: int, subject: str | None = None) -> dict[str, Any] | None:
+    with get_connection() as connection:
+        if subject:
+            row = connection.execute(
+                """
+                SELECT student_id, class_id, subject, profile_json, summary, generated_by_model,
+                       based_on_assessments, last_submission_at, updated_at
+                FROM student_adaptation_profiles
+                WHERE student_id = ? AND subject = ?
+                LIMIT 1
+                """,
+                (student_id, subject),
+            ).fetchone()
+        else:
+            row = connection.execute(
+                """
+                SELECT student_id, class_id, subject, profile_json, summary, generated_by_model,
+                       based_on_assessments, last_submission_at, updated_at
+                FROM student_adaptation_profiles
+                WHERE student_id = ?
+                ORDER BY updated_at DESC
+                LIMIT 1
+                """,
+                (student_id,),
+            ).fetchone()
+    if not row:
+        return None
+    item = dict(row)
+    item["profile"] = json.loads(item["profile_json"] or "{}")
+    return item
 
 
 def list_google_linked_assessments() -> list[dict[str, Any]]:

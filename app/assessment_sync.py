@@ -4,6 +4,7 @@ from collections import defaultdict
 import json
 from typing import Any
 
+from app.gemma_adaptation_profile import generate_student_adaptation_profile_with_gemma
 from app.gemma_blueprint import generate_student_blueprint_with_gemma
 from app.gemma_grader import grade_answer_with_gemma
 from app.google_forms import list_google_form_responses
@@ -13,11 +14,13 @@ from app.repository import (
     claim_next_queued_response,
     enqueue_response_for_processing,
     get_assessment_sync_bundle,
+    get_student_adaptation_profile_context,
     get_student_blueprint_context,
     list_google_linked_assessments,
     mark_queue_item_completed,
     mark_queue_item_failed,
     replace_mastery_snapshots,
+    upsert_student_adaptation_profile,
     upsert_student_blueprint,
     upsert_google_form_response_sync,
 )
@@ -142,6 +145,14 @@ def process_next_queued_response(
             class_mastery_rows=class_mastery_rows,
         )
         _refresh_student_blueprint(
+            student_id=student["id"],
+            class_id=bundle["assessment"]["class_id"],
+            subject=bundle["assessment"]["subject"],
+            last_submission_at=response.get("lastSubmittedTime"),
+            llama_client=llama_client,
+            llama_model_name=llama_model_name,
+        )
+        _refresh_student_adaptation_profile(
             student_id=student["id"],
             class_id=bundle["assessment"]["class_id"],
             subject=bundle["assessment"]["subject"],
@@ -311,6 +322,43 @@ def _refresh_student_blueprint(
         class_id=class_id,
         subject=subject,
         blueprint=blueprint,
+        generated_by_model=llama_model_name,
+        based_on_assessments=assessment_count,
+        last_submission_at=last_submission_at,
+    )
+
+
+def _refresh_student_adaptation_profile(
+    *,
+    student_id: int,
+    class_id: int,
+    subject: str,
+    last_submission_at: str | None,
+    llama_client: LlamaServerClient,
+    llama_model_name: str,
+) -> None:
+    context = get_student_adaptation_profile_context(student_id, subject)
+    assessment_count = len(context.get("assessment_history", []))
+    generated = generate_student_adaptation_profile_with_gemma(
+        client=llama_client,
+        model_name=llama_model_name,
+        temperature=MODEL_SAMPLING.temperature,
+        top_p=MODEL_SAMPLING.top_p,
+        top_k=MODEL_SAMPLING.top_k,
+        student_context=context,
+    )
+    final_profile = {
+        "mastery_map": context.get("mastery_map", []),
+        "attendance_signal": context.get("attendance_signal", {}),
+        "intervention_history": context.get("intervention_history", []),
+        **generated,
+    }
+    upsert_student_adaptation_profile(
+        student_id=student_id,
+        class_id=class_id,
+        subject=subject,
+        profile=final_profile,
+        summary=generated.get("summary", ""),
         generated_by_model=llama_model_name,
         based_on_assessments=assessment_count,
         last_submission_at=last_submission_at,
