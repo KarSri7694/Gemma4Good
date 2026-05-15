@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 from pathlib import Path
 import re
 
@@ -14,6 +15,8 @@ class ModelSamplingConfig:
     temperature: float = 0.2
     top_p: float = 0.95
     top_k: int = 40
+    llama_base_url: str = "http://127.0.0.1:8080"
+    llama_model_name: str = "Gemma-4-E4B-Q4_K_M"
     quiz_question_generation_mode: str = "AUTO"
     auto_grade_poll_interval_seconds: int = 15
     max_agent_iterations: int = 10
@@ -35,19 +38,24 @@ def load_model_sampling_config(path: Path = MODEL_CONTROL_PATH) -> ModelSampling
             key, value = line.split("=", 1)
             values[key.strip()] = value.strip()
 
+    def get_value(key: str, default: str) -> str:
+        return os.getenv(key, values.get(key, default)).strip()
+
     return ModelSamplingConfig(
-        temperature=float(values.get("LLAMA_TEMPERATURE", "0.2")),
-        top_p=float(values.get("LLAMA_TOP_P", "0.95")),
-        top_k=int(values.get("LLAMA_TOP_K", "40")),
-        quiz_question_generation_mode=values.get("QUIZ_QUESTION_GENERATION_MODE", "AUTO").strip().upper(),
-        auto_grade_poll_interval_seconds=int(values.get("AUTO_GRADE_POLL_INTERVAL_SECONDS", "15")),
-        max_agent_iterations=int(values.get("MAX_AGENT_ITERATIONS", "10")),
-        show_reasoning=values.get("SHOW_REASONING", "true").strip().lower() in {"1", "true", "yes", "on"},
-        embedding_model_server=values.get("EMBEDDING_MODEL_SERVER", "http://127.0.0.1:8081").strip(),
-        embedding_model_name=values.get("EMBEDDING_MODEL_NAME", "embedding-model").strip(),
-        rag_chunk_target_tokens=int(values.get("RAG_CHUNK_TARGET_TOKENS", "750")),
-        rag_chunk_overlap_tokens=int(values.get("RAG_CHUNK_OVERLAP_TOKENS", "150")),
-        rag_top_k=int(values.get("RAG_TOP_K", "5")),
+        temperature=float(get_value("LLAMA_TEMPERATURE", "0.2")),
+        top_p=float(get_value("LLAMA_TOP_P", "0.95")),
+        top_k=int(get_value("LLAMA_TOP_K", "40")),
+        llama_base_url=get_value("LLAMA_BASE_URL", "http://127.0.0.1:8080"),
+        llama_model_name=get_value("LLAMA_MODEL_NAME", "Gemma-4-E4B-Q4_K_M"),
+        quiz_question_generation_mode=get_value("QUIZ_QUESTION_GENERATION_MODE", "AUTO").upper(),
+        auto_grade_poll_interval_seconds=int(get_value("AUTO_GRADE_POLL_INTERVAL_SECONDS", "15")),
+        max_agent_iterations=int(get_value("MAX_AGENT_ITERATIONS", "10")),
+        show_reasoning=get_value("SHOW_REASONING", "true").lower() in {"1", "true", "yes", "on"},
+        embedding_model_server=get_value("EMBEDDING_MODEL_SERVER", "http://127.0.0.1:8081"),
+        embedding_model_name=get_value("EMBEDDING_MODEL_NAME", "embedding-model"),
+        rag_chunk_target_tokens=int(get_value("RAG_CHUNK_TARGET_TOKENS", "750")),
+        rag_chunk_overlap_tokens=int(get_value("RAG_CHUNK_OVERLAP_TOKENS", "150")),
+        rag_top_k=int(get_value("RAG_TOP_K", "5")),
     )
 
 

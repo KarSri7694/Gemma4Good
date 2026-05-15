@@ -20,31 +20,17 @@ from app.gemma_adaptation_profile import generate_student_adaptation_profile_wit
 from app.model_control import choose_quiz_generation_mode, load_model_sampling_config
 from app.material_ingestion import ingest_reading_material
 from app.rag import build_retrieval_context, search_subject_materials as search_rag_subject_materials
+from app.personalization import build_student_generation_context, build_student_retrieval_query
+from app.teaching_progress import DEFAULT_TEACHING_PLANNER_SERVICE
 from app.repository import (
-    add_student_to_class,
-    clear_class_attendance,
-    clear_student_attendance,
-    create_assessment,
-    create_chapter_for_class,
-    create_class_for_teacher,
-    deactivate_student,
-    delete_chapter_if_unused,
-    get_curriculum_subject,
-    get_student_adaptation_profile,
-    get_student_adaptation_profile_context,
-    get_student_detail,
-    get_teacher,
-    list_curriculum_chapters,
-    list_subject_materials,
-    reactivate_student,
-    update_assessment_google_form_info,
-    update_chapter_details,
-    update_class_details,
-    update_student_details,
-    update_student_attendance_status,
-    upsert_student_adaptation_profile,
+    assessment_repository,
+    attendance_repository,
+    curriculum_repository,
+    material_repository,
+    student_repository,
+    teacher_class_repository,
 )
-from app.db import ensure_database, get_connection
+from app.db import ensure_database
 from app.generator import build_quiz_questions
 from app.google_forms import create_google_form_quiz
 from app.quiz_engine import generate_quiz_with_llama
@@ -55,9 +41,10 @@ ensure_database()
 
 
 def _tool_settings() -> dict[str, str]:
+    sampling = load_model_sampling_config()
     return {
-        "llama_base_url": os.getenv("LLAMA_BASE_URL", "http://127.0.0.1:8080"),
-        "llama_model": os.getenv("LLAMA_MODEL", "Gemma-4-E4B-Q4_K_M"),
+        "llama_base_url": os.getenv("LLAMA_BASE_URL", sampling.llama_base_url),
+        "llama_model": os.getenv("LLAMA_MODEL", os.getenv("LLAMA_MODEL_NAME", sampling.llama_model_name)),
         "subject": os.getenv("TEACHER_TOOL_SUBJECT", "Science"),
         "grade_band": os.getenv("TEACHER_TOOL_GRADE_BAND", "6-8"),
     }
@@ -90,205 +77,27 @@ def _ask_llama(system_prompt: str, user_prompt: str) -> str:
 
 
 def _find_student_id(student_name: str = "", roll_number: str = "") -> int | None:
-    normalized_name = student_name.strip().lower()
-    normalized_roll = roll_number.strip()
-    with get_connection() as connection:
-        if normalized_roll:
-            row = connection.execute(
-                """
-                SELECT id
-                FROM students
-                WHERE roll_number = ? AND status = 'active'
-                ORDER BY id
-                LIMIT 1
-                """,
-                (normalized_roll,),
-            ).fetchone()
-            if row:
-                return int(row["id"])
-
-        if normalized_name:
-            row = connection.execute(
-                """
-                SELECT id
-                FROM students
-                WHERE LOWER(full_name) = ? AND status = 'active'
-                ORDER BY id
-                LIMIT 1
-                """,
-                (normalized_name,),
-            ).fetchone()
-            if row:
-                return int(row["id"])
-
-            row = connection.execute(
-                """
-                SELECT id
-                FROM students
-                WHERE LOWER(full_name) LIKE ? AND status = 'active'
-                ORDER BY id
-                LIMIT 1
-                """,
-                (f"%{normalized_name}%",),
-            ).fetchone()
-            if row:
-                return int(row["id"])
-    return None
+    return student_repository.find_student_id(student_name=student_name, roll_number=roll_number)
 
 
 def _find_teacher_and_class_for_subject(subject: str) -> tuple[int | None, dict | None]:
-    normalized_subject = subject.strip().lower()
-    with get_connection() as connection:
-        row = connection.execute(
-            """
-            SELECT
-                t.id AS teacher_id,
-                c.id AS class_id,
-                c.grade,
-                c.section,
-                cs.subject
-            FROM classes c
-            JOIN teachers t ON t.id = c.teacher_id
-            JOIN class_subjects cs ON cs.class_id = c.id
-            WHERE LOWER(cs.subject) = ?
-            ORDER BY c.id
-            LIMIT 1
-            """,
-            (normalized_subject,),
-        ).fetchone()
-    if not row:
-        return None, None
-    return int(row["teacher_id"]), dict(row)
+    return teacher_class_repository.find_teacher_and_class_for_subject(subject)
 
 
 def _find_class_for_attendance(grade: str, section: str, subject: str) -> tuple[int | None, dict | None]:
-    with get_connection() as connection:
-        row = connection.execute(
-            """
-            SELECT
-                t.id AS teacher_id,
-                c.id AS class_id,
-                c.grade,
-                c.section,
-                cs.subject
-            FROM classes c
-            JOIN teachers t ON t.id = c.teacher_id
-            JOIN class_subjects cs ON cs.class_id = c.id
-            WHERE c.grade = ? AND LOWER(c.section) = ? AND LOWER(cs.subject) = ?
-            ORDER BY c.id
-            LIMIT 1
-            """,
-            (grade.strip(), section.strip().lower(), subject.strip().lower()),
-        ).fetchone()
-    if not row:
-        return None, None
-    return int(row["teacher_id"]), dict(row)
+    return teacher_class_repository.find_class_for_attendance(grade, section, subject)
 
 
 def _find_class_for_management(grade: str, section: str, subject: str = "") -> tuple[int | None, dict | None]:
-    normalized_subject = subject.strip().lower()
-    with get_connection() as connection:
-        if normalized_subject:
-            row = connection.execute(
-                """
-                SELECT
-                    t.id AS teacher_id,
-                    c.id AS class_id,
-                    c.grade,
-                    c.section,
-                    cs.subject,
-                    c.academic_year,
-                    COALESCE(cs.medium, c.medium) AS medium
-                FROM classes c
-                JOIN teachers t ON t.id = c.teacher_id
-                JOIN class_subjects cs ON cs.class_id = c.id
-                WHERE c.grade = ? AND LOWER(c.section) = ? AND LOWER(cs.subject) = ?
-                ORDER BY c.id
-                LIMIT 1
-                """,
-                (grade.strip(), section.strip().lower(), normalized_subject),
-            ).fetchone()
-        else:
-            row = connection.execute(
-                """
-                SELECT
-                    t.id AS teacher_id,
-                    c.id AS class_id,
-                    c.grade,
-                    c.section,
-                    c.subject,
-                    c.academic_year,
-                    c.medium
-                FROM classes c
-                JOIN teachers t ON t.id = c.teacher_id
-                WHERE c.grade = ? AND LOWER(c.section) = ?
-                ORDER BY c.id
-                LIMIT 1
-                """,
-                (grade.strip(), section.strip().lower()),
-            ).fetchone()
-    if not row:
-        return None, None
-    return int(row["teacher_id"]), dict(row)
+    return teacher_class_repository.find_class_for_management(grade, section, subject)
 
 
 def _find_chapter_for_class_topic(class_id: int, topic: str) -> dict | None:
-    normalized_topic = topic.strip().lower()
-    with get_connection() as connection:
-        row = connection.execute(
-            """
-            SELECT id, chapter_name
-            FROM chapters
-            WHERE id IN (
-                SELECT ch.id
-                FROM chapters ch
-                JOIN classes c ON c.grade = ch.grade
-                JOIN class_subjects cs ON cs.class_id = c.id AND cs.subject = ch.subject
-                WHERE c.id = ?
-            )
-            AND LOWER(chapter_name) = ?
-            ORDER BY chapter_name
-            LIMIT 1
-            """,
-            (class_id, normalized_topic),
-        ).fetchone()
-        if row:
-            return dict(row)
-
-        row = connection.execute(
-            """
-            SELECT id, chapter_name
-            FROM chapters
-            WHERE id IN (
-                SELECT ch.id
-                FROM chapters ch
-                JOIN classes c ON c.grade = ch.grade
-                JOIN class_subjects cs ON cs.class_id = c.id AND cs.subject = ch.subject
-                WHERE c.id = ?
-            )
-            AND LOWER(chapter_name) LIKE ?
-            ORDER BY chapter_name
-            LIMIT 1
-            """,
-            (class_id, f"%{normalized_topic}%"),
-        ).fetchone()
-    return dict(row) if row else None
+    return curriculum_repository.find_chapter_for_class_topic(class_id, topic)
 
 
 def _find_fallback_chapter_for_class(class_id: int) -> dict | None:
-    with get_connection() as connection:
-        row = connection.execute(
-            """
-            SELECT ch.id, ch.chapter_name
-            FROM chapters ch
-            JOIN classes c ON c.grade = ch.grade AND c.subject = ch.subject
-            WHERE c.id = ?
-            ORDER BY ch.chapter_name
-            LIMIT 1
-            """,
-            (class_id,),
-        ).fetchone()
-    return dict(row) if row else None
+    return curriculum_repository.find_fallback_chapter_for_class(class_id)
 
 
 def _generate_and_store_adaptation_profile(
@@ -298,7 +107,7 @@ def _generate_and_store_adaptation_profile(
     llama_client: LlamaServerClient,
     llama_model_name: str,
 ) -> dict:
-    context = get_student_adaptation_profile_context(student_id, subject)
+    context = student_repository.get_student_adaptation_profile_context(student_id, subject)
     student_row = context.get("student") or {}
     generated = generate_student_adaptation_profile_with_gemma(
         client=llama_client,
@@ -314,7 +123,7 @@ def _generate_and_store_adaptation_profile(
         "intervention_history": context.get("intervention_history", []),
         **generated,
     }
-    upsert_student_adaptation_profile(
+    student_repository.upsert_student_adaptation_profile(
         student_id=student_id,
         class_id=int(student_row.get("class_id", 0)),
         subject=subject,
@@ -324,7 +133,7 @@ def _generate_and_store_adaptation_profile(
         based_on_assessments=len(context.get("assessment_history", [])),
         last_submission_at=context.get("attendance_signal", {}).get("attendance_last_marked_on"),
     )
-    profile_row = get_student_adaptation_profile(student_id, subject)
+    profile_row = student_repository.get_student_adaptation_profile(student_id, subject)
     return profile_row or {
         "student_id": student_id,
         "subject": subject,
@@ -334,43 +143,7 @@ def _generate_and_store_adaptation_profile(
 
 
 def _find_chapter_for_management(class_id: int, chapter_name: str) -> dict | None:
-    normalized_name = chapter_name.strip().lower()
-    with get_connection() as connection:
-        row = connection.execute(
-            """
-            SELECT id, chapter_code, chapter_name, term
-            FROM chapters
-            WHERE id IN (
-                SELECT ch.id
-                FROM chapters ch
-                JOIN classes c ON c.grade = ch.grade AND c.subject = ch.subject
-                WHERE c.id = ?
-            )
-            AND LOWER(chapter_name) = ?
-            ORDER BY chapter_name
-            LIMIT 1
-            """,
-            (class_id, normalized_name),
-        ).fetchone()
-        if row:
-            return dict(row)
-        row = connection.execute(
-            """
-            SELECT id, chapter_code, chapter_name, term
-            FROM chapters
-            WHERE id IN (
-                SELECT ch.id
-                FROM chapters ch
-                JOIN classes c ON c.grade = ch.grade AND c.subject = ch.subject
-                WHERE c.id = ?
-            )
-            AND LOWER(chapter_name) LIKE ?
-            ORDER BY chapter_name
-            LIMIT 1
-            """,
-            (class_id, f"%{normalized_name}%"),
-        ).fetchone()
-    return dict(row) if row else None
+    return curriculum_repository.find_chapter_for_management(class_id, chapter_name)
 
 
 @mcp.tool(description="Check the configured model endpoint for this teacher tool server.")
@@ -482,7 +255,7 @@ def get_student_information(
     if student_id is None:
         return "No active student found for the provided student name or roll number."
 
-    student_detail = get_student_detail(student_id)
+    student_detail = student_repository.get_student_detail(student_id)
     if not student_detail.get("student"):
         return "Student record was found, but detailed student data is unavailable."
 
@@ -498,7 +271,7 @@ def get_student_adaptation_profile_tool(
     student_id = _find_student_id(student_name=student_name, roll_number=roll_number)
     if student_id is None:
         return "No active student found for the provided student name or roll number."
-    profile = get_student_adaptation_profile(student_id, subject.strip() or None)
+    profile = student_repository.get_student_adaptation_profile(student_id, subject.strip() or None)
     if not profile:
         return "No adaptation profile exists yet for the requested student and subject."
     return json.dumps(profile, indent=2, ensure_ascii=False)
@@ -513,7 +286,7 @@ def regenerate_student_adaptation_profile(
     student_id = _find_student_id(student_name=student_name, roll_number=roll_number)
     if student_id is None:
         return "No active student found for the provided student name or roll number."
-    student_detail = get_student_detail(student_id)
+    student_detail = student_repository.get_student_detail(student_id)
     student_row = student_detail.get("student") or {}
     resolved_subject = subject.strip() or student_row.get("subject", "")
     if not resolved_subject:
@@ -539,12 +312,12 @@ def create_student_remedial_plan(
     student_id = _find_student_id(student_name=student_name, roll_number=roll_number)
     if student_id is None:
         return "No active student found for the provided student name or roll number."
-    student_detail = get_student_detail(student_id)
+    student_detail = student_repository.get_student_detail(student_id)
     student_row = student_detail.get("student") or {}
     resolved_subject = subject.strip() or student_row.get("subject", "")
     if not resolved_subject:
         return "No subject was provided and the student's class subject could not be resolved."
-    profile = get_student_adaptation_profile(student_id, resolved_subject)
+    profile = student_repository.get_student_adaptation_profile(student_id, resolved_subject)
     if not profile:
         settings = _tool_settings()
         client = LlamaServerClient(LlamaServerConfig(base_url=settings["llama_base_url"]))
@@ -587,14 +360,14 @@ def create_personalized_student_quiz(
     student_id = _find_student_id(student_name=student_name, roll_number=roll_number)
     if student_id is None:
         return "No active student found for the provided student name or roll number."
-    student_detail = get_student_detail(student_id)
+    student_detail = student_repository.get_student_detail(student_id)
     student_row = student_detail.get("student") or {}
     resolved_subject = subject.strip() or student_row.get("subject", "")
     if not resolved_subject:
         return "No subject was provided and the student's class subject could not be resolved."
     settings = _tool_settings()
     client = LlamaServerClient(LlamaServerConfig(base_url=settings["llama_base_url"]))
-    profile = get_student_adaptation_profile(student_id, resolved_subject)
+    profile = student_repository.get_student_adaptation_profile(student_id, resolved_subject)
     if not profile:
         profile = _generate_and_store_adaptation_profile(
             student_id=student_id,
@@ -602,6 +375,7 @@ def create_personalized_student_quiz(
             llama_client=client,
             llama_model_name=settings["llama_model"],
         )
+    student_context = student_repository.get_student_adaptation_profile_context(student_id, resolved_subject)
     teacher_id, class_row = _find_teacher_and_class_for_subject(resolved_subject)
     if teacher_id is None or class_row is None:
         return f"No class/teacher mapping was found for subject '{resolved_subject}'."
@@ -615,6 +389,25 @@ def create_personalized_student_quiz(
         settings["llama_model"],
         sampling.quiz_question_generation_mode,
     )
+    retrieval_query = build_student_retrieval_query(
+        subject=resolved_subject,
+        topic_hint=topic,
+        adaptation_profile=profile,
+        student_context=student_context,
+    )
+    retrieval_context = build_retrieval_context(
+        grade=str(class_row["grade"]),
+        subject=resolved_subject,
+        query=retrieval_query,
+        top_k=sampling.rag_top_k,
+    )
+    learner_profile, personalized_source_material = build_student_generation_context(
+        subject=resolved_subject,
+        topic_hint=topic,
+        adaptation_profile=profile,
+        student_context=student_context,
+        retrieval_context=retrieval_context,
+    )
     questions, generation_note, raw_outputs = generate_quiz_with_llama(
         client=client,
         base_url=settings["llama_base_url"],
@@ -623,11 +416,8 @@ def create_personalized_student_quiz(
         subject=resolved_subject,
         grade=str(class_row["grade"]),
         chapter_name=chapter_row["chapter_name"],
-        learner_profile=profile.get("summary", "") or "Target weak concepts and reinforce understanding.",
-        source_material=(
-            "Generate a personalized remedial quiz using this adaptation profile: "
-            + json.dumps(profile.get("profile", {}), ensure_ascii=False)
-        ),
+        learner_profile=learner_profile,
+        source_material=personalized_source_material,
         teacher_instructions=teacher_instructions,
         language=normalized_language,
         question_count=max(1, question_count),
@@ -639,7 +429,7 @@ def create_personalized_student_quiz(
         "%d/%m/%Y %I:%M %p",
     ).strftime("%Y-%m-%d %H:%M:%S")
     assessment_title = f"{student_row.get('full_name', 'Student')} Personalized Quiz"
-    assessment_id = create_assessment(
+    assessment_id = assessment_repository.create_assessment(
         class_id=int(class_row["class_id"]),
         chapter_id=int(chapter_row["id"]),
         teacher_id=teacher_id,
@@ -658,7 +448,7 @@ def create_personalized_student_quiz(
         ),
         questions=questions,
     )
-    update_assessment_google_form_info(
+    assessment_repository.update_assessment_google_form_info(
         assessment_id=assessment_id,
         google_form_id=form_result["form_id"],
         google_form_url=form_result["edit_uri"],
@@ -769,7 +559,7 @@ def create_quiz_for_topic(
             "Ask the teacher to provide the due date in DD/MM/YYYY format and the due time in 12-hour format like 05:30 PM."
         )
     assessment_title = f"{topic.strip()} Quiz"
-    assessment_id = create_assessment(
+    assessment_id = assessment_repository.create_assessment(
         class_id=int(class_row["class_id"]),
         chapter_id=int(chapter_row["id"]),
         teacher_id=teacher_id,
@@ -788,7 +578,7 @@ def create_quiz_for_topic(
         ),
         questions=questions,
     )
-    update_assessment_google_form_info(
+    assessment_repository.update_assessment_google_form_info(
         assessment_id=assessment_id,
         google_form_id=form_result["form_id"],
         google_form_url=form_result["edit_uri"],
@@ -845,7 +635,7 @@ def ingest_subject_material(
     else:
         return "Provide either pasted text content or a local file path."
 
-    teacher_row = get_teacher()
+    teacher_row = teacher_class_repository.get_teacher()
     if not teacher_row:
         return "No teacher record is configured."
 
@@ -863,9 +653,9 @@ def ingest_subject_material(
             llama_base_url=_tool_settings()["llama_base_url"],
             llama_model_name=_tool_settings()["llama_model"],
         )
-        curriculum_subject = get_curriculum_subject(grade=grade.strip(), subject=result["subject"])
-        chapters = list_curriculum_chapters(curriculum_subject["id"]) if curriculum_subject else []
-        materials = list_subject_materials(grade=grade.strip(), subject=result["subject"])
+        curriculum_subject = curriculum_repository.get_curriculum_subject(grade=grade.strip(), subject=result["subject"])
+        chapters = curriculum_repository.list_curriculum_chapters(curriculum_subject["id"]) if curriculum_subject else []
+        materials = material_repository.list_subject_materials(grade=grade.strip(), subject=result["subject"])
         return json.dumps(
             {
                 "grade": grade.strip(),
@@ -1014,7 +804,7 @@ def edit_student_attendance(
             f"No class mapping was found for Grade {grade.strip()}-{section.strip()} "
             f"and subject '{subject.strip()}'."
         )
-    update_student_attendance_status(
+    attendance_repository.update_student_attendance_status(
         class_id=int(class_row["class_id"]),
         student_id=student_id,
         teacher_id=teacher_id,
@@ -1045,11 +835,10 @@ def create_class(
     subject: Annotated[str, "The subject, for example Science"],
     medium: Annotated[str, "The teaching medium, for example English"] = "",
 ) -> str:
-    with get_connection() as connection:
-        teacher_row = connection.execute("SELECT id FROM teachers ORDER BY id LIMIT 1").fetchone()
+    teacher_row = teacher_class_repository.get_teacher()
     if not teacher_row:
         return "No teacher record was found."
-    class_id = create_class_for_teacher(
+    class_id = teacher_class_repository.create_class_for_teacher(
         teacher_id=int(teacher_row["id"]),
         academic_year=academic_year,
         grade=grade,
@@ -1088,7 +877,7 @@ def add_student(
             f"No class mapping was found for Grade {grade.strip()}-{section.strip()} "
             f"and subject '{subject.strip()}'."
         )
-    student_id = add_student_to_class(
+    student_id = student_repository.add_student_to_class(
         class_id=int(class_row["class_id"]),
         roll_number=roll_number,
         full_name=full_name,
@@ -1116,7 +905,7 @@ def remove_student(
     student_id = _find_student_id(student_name=student_name, roll_number=roll_number)
     if student_id is None:
         return "No active student found for the provided student name or roll number."
-    deactivate_student(student_id)
+    student_repository.deactivate_student(student_id)
     return json.dumps(
         {
             "student_id": student_id,
@@ -1142,7 +931,7 @@ def add_subject_chapter(
             f"No class mapping was found for Grade {grade.strip()}-{section.strip()} "
             f"and subject '{subject.strip()}'."
         )
-    chapter_id = create_chapter_for_class(
+    chapter_id = curriculum_repository.create_chapter_for_class(
         class_id=int(class_row["class_id"]),
         subject=subject,
         chapter_code=chapter_code,
@@ -1177,7 +966,7 @@ def clear_attendance_records(
         if student_id is None:
             return "No active student found for the provided student name or roll number."
         teacher_id, class_row = _find_class_for_management(grade, section, subject) if grade.strip() and section.strip() else (None, None)
-        deleted = clear_student_attendance(student_id, int(class_row["class_id"]) if class_row else None)
+        deleted = attendance_repository.clear_student_attendance(student_id, int(class_row["class_id"]) if class_row else None)
         return json.dumps(
             {
                 "scope": "student",
@@ -1194,7 +983,7 @@ def clear_attendance_records(
                 f"No class mapping was found for Grade {grade.strip()}-{section.strip()} "
                 f"and subject '{subject.strip()}'."
             )
-        deleted = clear_class_attendance(int(class_row["class_id"]))
+        deleted = attendance_repository.clear_class_attendance(int(class_row["class_id"]))
         return json.dumps(
             {
                 "scope": "class",
@@ -1224,7 +1013,7 @@ def update_class(
             f"No class mapping was found for Grade {grade.strip()}-{section.strip()} "
             f"and subject '{subject.strip()}'."
         )
-    update_class_details(
+    teacher_class_repository.update_class_details(
         class_id=int(class_row["class_id"]),
         academic_year=new_academic_year or class_row["academic_year"],
         grade=new_grade or class_row["grade"],
@@ -1259,11 +1048,11 @@ def update_student(
     student_id = _find_student_id(student_name=student_name, roll_number=roll_number)
     if student_id is None:
         return "No active student found for the provided student name or roll number."
-    student_detail = get_student_detail(student_id)
+    student_detail = student_repository.get_student_detail(student_id)
     student_row = student_detail.get("student")
     if not student_row:
         return "Student record was found, but detailed student data is unavailable."
-    update_student_details(
+    student_repository.update_student_details(
         student_id=student_id,
         roll_number=new_roll_number or student_row["roll_number"],
         full_name=new_full_name or student_row["full_name"],
@@ -1289,7 +1078,7 @@ def update_student(
 def restore_student(
     student_id: Annotated[int, "The student id to reactivate"],
 ) -> str:
-    reactivate_student(student_id)
+    student_repository.reactivate_student(student_id)
     return json.dumps(
         {
             "student_id": student_id,
@@ -1319,7 +1108,7 @@ def update_subject_chapter(
     chapter_row = _find_chapter_for_management(int(class_row["class_id"]), current_chapter_name)
     if not chapter_row:
         return f"No chapter mapping was found for '{current_chapter_name.strip()}'."
-    update_chapter_details(
+    curriculum_repository.update_chapter_details(
         chapter_id=int(chapter_row["id"]),
         chapter_code=new_chapter_code or chapter_row["chapter_code"],
         chapter_name=new_chapter_name or chapter_row["chapter_name"],
@@ -1353,7 +1142,7 @@ def delete_subject_chapter(
     chapter_row = _find_chapter_for_management(int(class_row["class_id"]), chapter_name)
     if not chapter_row:
         return f"No chapter mapping was found for '{chapter_name.strip()}'."
-    deleted, message = delete_chapter_if_unused(int(chapter_row["id"]))
+    deleted, message = curriculum_repository.delete_chapter_if_unused(int(chapter_row["id"]))
     return json.dumps(
         {
             "chapter_id": int(chapter_row["id"]),
@@ -1363,6 +1152,92 @@ def delete_subject_chapter(
         indent=2,
         ensure_ascii=False,
     )
+
+
+@mcp.tool(description="Import a full grade syllabus text, split it into subjects, and populate subject plans and chapters for the class grade.")
+def import_grade_syllabus_text(
+    grade: Annotated[str, "The class grade, for example 7"],
+    section: Annotated[str, "The class section, for example A"],
+    academic_year: Annotated[str, "Academic year like 2026-27"],
+    syllabus_text: Annotated[str, "The full grade syllabus text containing multiple subjects"],
+    board_type: Annotated[str, "Board type such as CBSE"] = "CBSE",
+) -> str:
+    teacher_row = teacher_class_repository.get_teacher()
+    if not teacher_row:
+        return "No teacher record was found."
+    teacher_id, class_row = _find_class_for_management(grade, section)
+    if teacher_id is None or class_row is None:
+        return f"No class mapping was found for Grade {grade.strip()}-{section.strip()}."
+    settings = _tool_settings()
+    result = DEFAULT_TEACHING_PLANNER_SERVICE.import_grade_syllabus_document(
+        teacher_id=int(teacher_row["id"]),
+        class_id=int(class_row["class_id"]),
+        academic_year=academic_year.strip() or str(class_row.get("academic_year") or "").strip(),
+        grade=grade.strip(),
+        board_type=board_type.strip() or "CBSE",
+        syllabus_text=syllabus_text,
+        llama_base_url=settings["llama_base_url"],
+        llama_model_name=settings["llama_model"],
+        use_llama_server=True,
+    )
+    return json.dumps(result, indent=2, ensure_ascii=False)
+
+
+@mcp.tool(description="Import a weekly timetable grid text and populate timetable slots across subjects for the selected class.")
+def import_weekly_timetable_text(
+    grade: Annotated[str, "The class grade, for example 7"],
+    section: Annotated[str, "The class section, for example A"],
+    timetable_text: Annotated[str, "The timetable grid text with weekday rows and time-slot columns"],
+) -> str:
+    teacher_id, class_row = _find_class_for_management(grade, section)
+    if teacher_id is None or class_row is None:
+        return f"No class mapping was found for Grade {grade.strip()}-{section.strip()}."
+    settings = _tool_settings()
+    result = DEFAULT_TEACHING_PLANNER_SERVICE.import_timetable_grid_document(
+        class_id=int(class_row["class_id"]),
+        grade=grade.strip(),
+        timetable_text=timetable_text,
+        llama_base_url=settings["llama_base_url"],
+        llama_model_name=settings["llama_model"],
+        use_llama_server=True,
+    )
+    return json.dumps({"imported_slots": result, "count": len(result)}, indent=2, ensure_ascii=False)
+
+
+@mcp.tool(description="Update the subject year plan after a class using a teacher note or transcript.")
+def update_teaching_progress_from_note(
+    grade: Annotated[str, "The class grade, for example 7"],
+    section: Annotated[str, "The class section, for example A"],
+    subject: Annotated[str, "The class subject, for example Science"],
+    session_date: Annotated[str, "Session date in YYYY-MM-DD format"],
+    teacher_note: Annotated[str, "A short teacher recap or transcript of what was taught"],
+) -> str:
+    teacher_id, class_row = _find_class_for_management(grade, section, subject)
+    if teacher_id is None or class_row is None:
+        return (
+            f"No class mapping was found for Grade {grade.strip()}-{section.strip()} "
+            f"and subject '{subject.strip()}'."
+        )
+    settings = _tool_settings()
+    result = DEFAULT_TEACHING_PLANNER_SERVICE.process_class_session(
+        class_id=int(class_row["class_id"]),
+        teacher_id=int(teacher_id),
+        subject=subject.strip(),
+        academic_year=str(class_row.get("academic_year") or "").strip(),
+        session_date=session_date.strip(),
+        teacher_note=teacher_note,
+        audio_bytes=b"",
+        audio_mime_type="audio/wav",
+        llama_base_url=settings["llama_base_url"],
+        llama_model_name=settings["llama_model"],
+        use_llama_server=True,
+        scheduled_start="",
+        scheduled_end="",
+        actual_start="",
+        actual_end="",
+        timetable_slot_id=None,
+    )
+    return json.dumps(result, indent=2, ensure_ascii=False)
 
 
 if __name__ == "__main__":

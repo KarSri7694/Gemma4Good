@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import atexit
 import asyncio
-import sys
 import json
 from pathlib import Path
-from datetime import datetime
+import signal
+import sys
+import threading
+from datetime import datetime, timedelta
 
 import streamlit as st
 from requests import RequestException
@@ -15,6 +18,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from app.db import ensure_database
+from app.daily_brief import DEFAULT_DAILY_LOOP_SERVICE
 from app.demo_seed import ensure_demo_data
 from app.assessment_sync import sync_google_form_assessment
 from app.attendance import mark_attendance_from_identifiers, parse_absent_students_from_audio, resolve_absent_students
@@ -23,55 +27,26 @@ from app.generator import build_lesson_pack, build_quiz_questions
 from app.llama_client import LlamaServerClient, LlamaServerConfig
 from app.material_ingestion import ingest_reading_material
 from app.model_control import choose_quiz_generation_mode, load_model_sampling_config
+from app.personalization import build_student_generation_context, build_student_retrieval_query
 from app.pdf_export import build_quiz_pdf_bytes
 from app.rag import build_retrieval_context, search_subject_materials
+from app.teaching_progress import DEFAULT_TEACHING_PLANNER_SERVICE, WEEKDAY_LABELS, WEEKDAY_OPTIONS
 from mcp_servers.llama_MCP_bridge import cleanup as cleanup_mcp_bridge
 from mcp_servers.llama_MCP_bridge import execute_tool as execute_mcp_tool
 from mcp_servers.llama_MCP_bridge import get_all_mcp_tools
 from mcp_servers.llama_MCP_bridge import start_servers as start_mcp_servers
 from app.repository import (
-    add_subject_to_class,
-    add_student_to_class,
-    clear_class_attendance,
-    clear_student_attendance,
-    create_chapter_for_class,
-    create_class_for_teacher,
-    create_assessment,
-    deactivate_student,
-    delete_chapter_if_unused,
-    get_class_attendance_stats,
-    get_student_adaptation_profile,
-    get_student_adaptation_profile_context,
-    get_class_overview,
-    get_attendance_overview,
-    get_curriculum_subject,
-    get_student_assessment_review,
-    get_student_detail,
-    get_teacher,
-    list_class_subjects,
-    list_grade_curriculum_subjects,
-    list_curriculum_chapters,
-    list_inactive_class_students,
-    list_assessments_for_sync,
-    list_attendance_for_date,
-    list_attempted_students_for_assessment,
-    list_chapters_for_class,
-    list_class_assessments,
-    list_class_concept_gaps,
-    list_class_roster,
-    list_class_students,
-    list_teacher_classes,
-    list_queue_items,
-    list_recent_ingestion_runs,
-    list_subject_materials,
-    reactivate_student,
-    update_chapter_details,
-    update_class_details,
-    update_class_subject_details,
-    update_student_details,
-    update_student_attendance_status,
-    update_assessment_google_form_info,
-    upsert_student_adaptation_profile,
+    assessment_repository,
+    attendance_repository,
+    analytics_repository,
+    coverage_repository,
+    curriculum_repository,
+    material_repository,
+    planning_repository,
+    queue_repository,
+    student_repository,
+    teacher_class_repository,
+    timetable_repository,
 )
 
 
@@ -80,6 +55,229 @@ st.set_page_config(page_title="Pathshala Play", page_icon="PP", layout="wide")
 ensure_database()
 ensure_demo_data()
 MODEL_SAMPLING = load_model_sampling_config()
+_SHUTDOWN_HOOKS_REGISTERED = False
+
+
+def _cleanup_mcp_bridge_sync() -> None:
+    try:
+        if DEFAULT_TEACHING_PLANNER_SERVICE.get_local_recorder_status().get("active"):
+            DEFAULT_TEACHING_PLANNER_SERVICE.stop_local_microphone_recording()
+    except Exception:
+        pass
+    try:
+        asyncio.run(cleanup_mcp_bridge())
+    except RuntimeError:
+        try:
+            loop = asyncio.new_event_loop()
+            try:
+                loop.run_until_complete(cleanup_mcp_bridge())
+            finally:
+                loop.close()
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+
+def _handle_app_shutdown(_signum=None, _frame=None) -> None:
+    _cleanup_mcp_bridge_sync()
+    raise SystemExit(0)
+
+
+def _register_shutdown_hooks() -> None:
+    global _SHUTDOWN_HOOKS_REGISTERED
+    if _SHUTDOWN_HOOKS_REGISTERED:
+        return
+
+    atexit.register(_cleanup_mcp_bridge_sync)
+    if threading.current_thread() is threading.main_thread():
+        for signal_name in ("SIGINT", "SIGTERM", "SIGBREAK"):
+            signal_value = getattr(signal, signal_name, None)
+            if signal_value is None:
+                continue
+            try:
+                signal.signal(signal_value, _handle_app_shutdown)
+            except (ValueError, OSError):
+                continue
+    _SHUTDOWN_HOOKS_REGISTERED = True
+
+
+_register_shutdown_hooks()
+
+
+def queue_teacher_chat_prompt(class_id: int, prompt_override: str = "") -> None:
+    input_key = f"teacher_chat_input_{class_id}"
+    pending_user_prompt_key = f"teacher_chat_pending_user_prompt_{class_id}"
+    prompt = prompt_override.strip() or str(st.session_state.get(input_key, "")).strip()
+    if prompt:
+        st.session_state[pending_user_prompt_key] = prompt
+
+
+def build_teacher_chat_prompt_from_inputs(
+    *,
+    class_id: int,
+    subject_name: str,
+    uploaded_chat_files,
+    recorded_chat_audio,
+    llama_base_url: str,
+    llama_model_name: str,
+    use_llama_server: bool,
+) -> str:
+    input_key = f"teacher_chat_input_{class_id}"
+    prompt_parts: list[str] = []
+    typed_prompt = str(st.session_state.get(input_key, "")).strip()
+    if typed_prompt:
+        prompt_parts.append(typed_prompt)
+
+    if recorded_chat_audio:
+        transcript = DEFAULT_TEACHING_PLANNER_SERVICE.transcribe_audio_to_text(
+            audio_bytes=recorded_chat_audio.getvalue(),
+            audio_mime_type=recorded_chat_audio.type or "audio/wav",
+            llama_base_url=llama_base_url,
+            llama_model_name=llama_model_name,
+            prompt_hint=f"Teacher chat voice note for subject {subject_name}",
+        )
+        prompt_parts.append(f"Teacher voice note transcript:\n{transcript}")
+
+    extracted_file_parts: list[str] = []
+    for uploaded_file in uploaded_chat_files or []:
+        extracted_text = DEFAULT_TEACHING_PLANNER_SERVICE.extract_uploaded_text(
+            content_bytes=uploaded_file.getvalue(),
+            mime_type=uploaded_file.type or "",
+            original_filename=uploaded_file.name,
+            llama_base_url=llama_base_url,
+            llama_model_name=llama_model_name,
+            use_llama_server=use_llama_server,
+        )
+        extracted_file_parts.append(
+            f"Attached file: {uploaded_file.name}\nExtracted text:\n{extracted_text[:16000]}"
+        )
+    if extracted_file_parts:
+        prompt_parts.append("\n\n".join(extracted_file_parts))
+
+    return "\n\n".join(part for part in prompt_parts if part.strip()).strip()
+
+
+def choose_auto_quiz_target(
+    *,
+    class_id: int,
+    class_row: dict,
+    class_subjects: list[dict],
+    llama_base_url: str,
+    llama_model_name: str,
+    use_llama_server: bool,
+) -> dict[str, str]:
+    subject_chapter_map: dict[str, list[dict[str, str]]] = {}
+    for item in class_subjects:
+        subject_name = str(item.get("subject") or "").strip()
+        if not subject_name:
+            continue
+        subject_chapter_map[subject_name] = curriculum_repository.list_chapters_for_class(class_id, subject_name)
+
+    assessment_history = assessment_repository.list_class_assessment_history(class_id)
+    compact_history = [
+        {
+            "subject": row.get("subject", ""),
+            "topic": row.get("chapter_name", ""),
+            "avg_percentage": row.get("avg_percentage"),
+            "submissions": row.get("submissions"),
+            "created_at": row.get("created_at", ""),
+        }
+        for row in assessment_history
+    ]
+
+    if use_llama_server:
+        try:
+            client = LlamaServerClient(LlamaServerConfig(base_url=llama_base_url))
+            response = client.chat_completion(
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are a teacher assessment planner. "
+                            "Choose the next best quiz target for the class. "
+                            "Use only the available subject chapters and the summarized academic-year quiz history. "
+                            "Prefer either an untested topic or a previously weak topic with low scores. "
+                            "Return strict JSON only with this shape: "
+                            "{\"subject\":\"string\",\"topic\":\"string\",\"reason\":\"string\",\"selection_mode\":\"untested|reteach\"}"
+                        ),
+                    },
+                    {
+                        "role": "user",
+                        "content": (
+                            f"Class: Grade {class_row.get('grade', '')}-{class_row.get('section', '')}\n"
+                            f"Academic year: {class_row.get('academic_year', '')}\n\n"
+                            "Available subject chapters:\n"
+                            f"{json.dumps(subject_chapter_map, indent=2, ensure_ascii=False)}\n\n"
+                            "Quiz history summaries for this academic year:\n"
+                            f"{json.dumps(compact_history, indent=2, ensure_ascii=False)}"
+                        ),
+                    },
+                ],
+                temperature=0.2,
+                top_p=0.9,
+                top_k=40,
+                response_format={"type": "json_object"},
+                extra_payload={"model": llama_model_name},
+            )
+            parsed = parse_json_content(extract_llama_content(response) or "")
+            if parsed and parsed.get("subject") and parsed.get("topic"):
+                return {
+                    "subject": str(parsed.get("subject") or "").strip(),
+                    "topic": str(parsed.get("topic") or "").strip(),
+                    "reason": str(parsed.get("reason") or "").strip(),
+                    "selection_mode": str(parsed.get("selection_mode") or "untested").strip(),
+                }
+        except (RequestException, ValueError, json.JSONDecodeError):
+            pass
+
+    tested_pairs = {
+        (str(item.get("subject") or "").strip().lower(), str(item.get("topic") or "").strip().lower())
+        for item in compact_history
+    }
+    weak_history = sorted(
+        [item for item in compact_history if item.get("avg_percentage") is not None],
+        key=lambda item: (item.get("avg_percentage", 100), -(item.get("submissions") or 0)),
+    )
+    if weak_history and float(weak_history[0].get("avg_percentage") or 100) < 60:
+        return {
+            "subject": str(weak_history[0].get("subject") or "").strip(),
+            "topic": str(weak_history[0].get("topic") or "").strip(),
+            "reason": "Selected a previously weak topic because the last average score was low.",
+            "selection_mode": "reteach",
+        }
+
+    for subject_name, chapters in subject_chapter_map.items():
+        for chapter in chapters:
+            pair = (subject_name.strip().lower(), str(chapter.get("chapter_name") or "").strip().lower())
+            if pair not in tested_pairs:
+                return {
+                    "subject": subject_name,
+                    "topic": str(chapter.get("chapter_name") or "").strip(),
+                    "reason": "Selected an untested chapter for coverage expansion.",
+                    "selection_mode": "untested",
+                }
+
+    fallback_subject = str(class_subjects[0].get("subject") or class_row.get("subject") or "").strip() if class_subjects else str(class_row.get("subject") or "").strip()
+    fallback_chapters = subject_chapter_map.get(fallback_subject, [])
+    fallback_topic = str(fallback_chapters[0].get("chapter_name") or "Concept revision").strip() if fallback_chapters else "Concept revision"
+    return {
+        "subject": fallback_subject,
+        "topic": fallback_topic,
+        "reason": "Used the first available chapter as fallback.",
+        "selection_mode": "untested",
+    }
+
+
+def stop_teacher_chat_run(class_id: int) -> None:
+    pending_agent_key = f"teacher_chat_pending_agent_{class_id}"
+    pending_user_prompt_key = f"teacher_chat_pending_user_prompt_{class_id}"
+    running_key = f"teacher_chat_running_{class_id}"
+    stop_requested_key = f"teacher_chat_stop_requested_{class_id}"
+    st.session_state.pop(pending_agent_key, None)
+    st.session_state.pop(pending_user_prompt_key, None)
+    st.session_state[running_key] = False
+    st.session_state[stop_requested_key] = True
 
 
 def build_quiz_generation_messages(
@@ -558,35 +756,161 @@ def format_attendance_date(value) -> str:
     return value.strftime("%Y-%m-%d")
 
 
+def get_planner_local_audio_keys(class_id: int, subject_name: str) -> tuple[str, str]:
+    return (
+        f"planner_local_audio_bytes_{class_id}_{subject_name}",
+        f"planner_local_audio_mime_{class_id}_{subject_name}",
+    )
+
+
+def maybe_auto_stop_local_recording(
+    *,
+    class_id: int,
+    subject_name: str,
+    info_message: str = "Local microphone recording auto-stopped 5 minutes after the scheduled end time.",
+) -> None:
+    planner_local_audio_bytes_key, planner_local_audio_mime_key = get_planner_local_audio_keys(class_id, subject_name)
+    recorder_status = DEFAULT_TEACHING_PLANNER_SERVICE.get_local_recorder_status()
+    recorder_session = recorder_status.get("session") or {}
+    if (
+        recorder_status.get("active")
+        and recorder_session.get("class_id") == class_id
+        and recorder_session.get("subject") == subject_name
+        and recorder_session.get("scheduled_end")
+    ):
+        try:
+            stop_deadline = datetime.strptime(
+                f"{datetime.now().date().isoformat()} {recorder_session['scheduled_end']}",
+                "%Y-%m-%d %H:%M",
+            )
+            if datetime.now() >= stop_deadline + timedelta(minutes=5):
+                finished_capture = DEFAULT_TEACHING_PLANNER_SERVICE.stop_local_microphone_recording()
+                st.session_state[planner_local_audio_bytes_key] = finished_capture["audio_bytes"]
+                st.session_state[planner_local_audio_mime_key] = finished_capture["audio_mime_type"]
+                st.info(info_message)
+                st.rerun()
+        except Exception:
+            pass
+
+
+def render_global_mic_controls(
+    *,
+    class_id: int,
+    subject_name: str,
+    active_timetable_slot: dict | None,
+    capture_support_status: dict,
+) -> None:
+    planner_local_audio_bytes_key, planner_local_audio_mime_key = get_planner_local_audio_keys(class_id, subject_name)
+    recorder_status = DEFAULT_TEACHING_PLANNER_SERVICE.get_local_recorder_status()
+    recorder_session = recorder_status.get("session") or {}
+
+    st.markdown("**Quick Mic Controls**")
+    control_col1, control_col2, control_col3 = st.columns([1, 1, 2])
+    with control_col1:
+        if st.button(
+            "Start Mic Recording",
+            key=f"global_start_local_mic_{class_id}_{subject_name}",
+            disabled=not capture_support_status.get("automatic_capture_available") or bool(recorder_status.get("active")),
+            use_container_width=True,
+        ):
+            try:
+                DEFAULT_TEACHING_PLANNER_SERVICE.start_local_microphone_recording(
+                    class_id=class_id,
+                    subject=subject_name,
+                    timetable_slot_id=int(active_timetable_slot["id"]) if active_timetable_slot else None,
+                    scheduled_end=str((active_timetable_slot or {}).get("end_time") or ""),
+                )
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Failed to start local microphone recording: {exc}")
+    with control_col2:
+        if st.button(
+            "Stop Mic Recording",
+            key=f"global_stop_local_mic_{class_id}_{subject_name}",
+            disabled=not bool(recorder_status.get("active")),
+            use_container_width=True,
+        ):
+            try:
+                finished_capture = DEFAULT_TEACHING_PLANNER_SERVICE.stop_local_microphone_recording()
+                target_class_id = int((recorder_session or {}).get("class_id") or class_id)
+                target_subject = str((recorder_session or {}).get("subject") or subject_name)
+                target_audio_bytes_key, target_audio_mime_key = get_planner_local_audio_keys(target_class_id, target_subject)
+                st.session_state[target_audio_bytes_key] = finished_capture["audio_bytes"]
+                st.session_state[target_audio_mime_key] = finished_capture["audio_mime_type"]
+                st.success(f"Local microphone recording saved for {target_subject}.")
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Failed to stop local microphone recording: {exc}")
+    with control_col3:
+        if recorder_status.get("active"):
+            st.caption(
+                f"Recording is active for {recorder_session.get('subject', subject_name)}"
+                f"{' until ' + recorder_session.get('scheduled_end', '') if recorder_session.get('scheduled_end') else ''}."
+            )
+        elif st.session_state.get(planner_local_audio_bytes_key):
+            st.caption(
+                f"Saved clip ready for {subject_name}: {len(st.session_state[planner_local_audio_bytes_key])} bytes."
+            )
+        else:
+            st.caption(capture_support_status.get("reason", "Microphone capture status unavailable."))
+
+
 def build_teacher_chat_messages(
     *,
     class_row: dict,
     overview: dict,
     concept_gaps: list[dict],
+    roster: list[dict],
+    chapters: list[dict],
     history: list[dict],
     subject_name: str,
     retrieval_context: str = "",
+    daily_brief: dict | None = None,
 ) -> list[dict[str, str]]:
+    current_timestamp = datetime.now().astimezone()
     top_concepts = concept_gaps[:5]
     concept_summary = "\n".join(
         f"- {item['concept_name']}: {item['mastery_percent']}% mastery, {item['students_lagging']} students lagging"
         for item in top_concepts
     ) or "- No concept gap data available yet."
+    roster_summary = "\n".join(
+        f"- {item.get('roll_number', 'No roll number')} | {item.get('full_name', 'Unknown student')}"
+        for item in roster
+    ) or "- No active students found."
+    chapter_summary = "\n".join(
+        f"- {item.get('chapter_code', 'No code')} | {item.get('chapter_name', 'Untitled chapter')}"
+        for item in chapters
+    ) or "- No chapters found for the selected subject."
     system_prompt = (
         "You are Gemma, acting as a classroom copilot for an Indian teacher. "
         "Give concise, practical, teacher-facing answers. "
+        "When the teacher asks you to perform an action, prefer using the available tools instead of only describing what should be done. "
+        "You can help with class management, quizzes, attendance, uploaded materials, grade-wide syllabus import, timetable import, and teaching-progress updates. "
         "Use the class context below. If you make recommendations, tie them to the subject, chapter misconceptions, "
         "assessment planning, or remediation strategy.\n\n"
+        f"Current date and time: {current_timestamp.strftime('%Y-%m-%d %I:%M %p %Z')}\n"
+        f"Current class: Grade {overview.get('grade', class_row.get('grade', ''))}-{overview.get('section', class_row.get('section', ''))}\n"
         f"Class: Grade {overview.get('grade', class_row.get('grade', ''))}-{overview.get('section', class_row.get('section', ''))}\n"
-        f"Subject: {subject_name}\n"
+        f"Current subject selected: {subject_name or class_row.get('subject', 'Not set')}\n"
+        f"Subject: {subject_name or class_row.get('subject', 'Not set')}\n"
         f"Medium: {overview.get('medium', class_row.get('medium', 'Not set'))}\n"
+        f"Academic year: {overview.get('academic_year', class_row.get('academic_year', 'Not set'))}\n"
         f"Student count: {overview.get('student_count', class_row.get('student_count', 0))}\n"
         f"Assessment count: {overview.get('assessment_count', 0)}\n"
+        "Students in this class:\n"
+        f"{roster_summary}\n"
+        "Subject chapters for the current class and selected subject:\n"
+        f"{chapter_summary}\n"
         "Top concept gaps:\n"
         f"{concept_summary}"
     )
     if retrieval_context:
         system_prompt += f"\n\nRetrieved subject material:\n{retrieval_context}"
+    if daily_brief:
+        system_prompt += (
+            "\n\nLatest Gemma daily loop brief:\n"
+            f"{json.dumps(daily_brief, indent=2, ensure_ascii=False)}"
+        )
     return [{"role": "system", "content": system_prompt}, *history]
 
 
@@ -626,10 +950,13 @@ async def run_teacher_chat_tool_loop_async(
     selected_class: dict,
     overview: dict,
     concept_gaps: list[dict],
+    roster: list[dict],
+    chapters: list[dict],
     history: list[dict],
     max_agent_iterations: int,
     subject_name: str,
     retrieval_context: str = "",
+    daily_brief: dict | None = None,
     base_messages: list[dict] | None = None,
     prior_tool_trace: list[str] | None = None,
 ) -> dict:
@@ -638,9 +965,12 @@ async def run_teacher_chat_tool_loop_async(
         class_row=selected_class,
         overview=overview,
         concept_gaps=concept_gaps,
+        roster=roster,
+        chapters=chapters,
         history=history,
         subject_name=subject_name,
         retrieval_context=retrieval_context,
+        daily_brief=daily_brief,
     )
     mcp_config_path = str(ROOT / "mcp.json")
     await start_mcp_servers(mcp_config_path)
@@ -667,7 +997,7 @@ async def run_teacher_chat_tool_loop_async(
             tool_calls = extract_tool_calls(response)
             if not tool_calls:
                 return {
-                    "status": "completed_without_tools",
+                    "status": "ready_for_final_answer",
                     "assistant_text": assistant_content or "",
                     "tool_trace": tool_trace,
                     "messages": messages,
@@ -738,10 +1068,13 @@ def run_teacher_chat_tool_loop(
     selected_class: dict,
     overview: dict,
     concept_gaps: list[dict],
+    roster: list[dict],
+    chapters: list[dict],
     history: list[dict],
     max_agent_iterations: int,
     subject_name: str,
     retrieval_context: str = "",
+    daily_brief: dict | None = None,
     base_messages: list[dict] | None = None,
     prior_tool_trace: list[str] | None = None,
 ) -> dict:
@@ -754,10 +1087,13 @@ def run_teacher_chat_tool_loop(
             selected_class=selected_class,
             overview=overview,
             concept_gaps=concept_gaps,
+            roster=roster,
+            chapters=chapters,
             history=history,
             max_agent_iterations=max_agent_iterations,
             subject_name=subject_name,
             retrieval_context=retrieval_context,
+            daily_brief=daily_brief,
             base_messages=base_messages,
             prior_tool_trace=prior_tool_trace,
         )
@@ -826,7 +1162,7 @@ def render_streamed_teacher_final_answer(*, llama_base_url: str, llama_model_nam
     return answer_text, reasoning_text
 
 
-teacher = get_teacher()
+teacher = teacher_class_repository.get_teacher()
 
 st.title("Pathshala Play")
 st.caption("Teacher dashboard for class diagnostics, quiz creation, and remedial planning")
@@ -841,8 +1177,8 @@ with st.sidebar:
     st.caption(f"{teacher['school_name']} | {teacher['google_account_email']}")
 
     st.subheader("Model")
-    llama_base_url = st.text_input("llama-server URL", value="http://127.0.0.1:8080")
-    llama_model_name = st.text_input("Model Name", value="Gemma-4-E4B-Q4_K_M")
+    llama_base_url = st.text_input("llama-server URL", value=MODEL_SAMPLING.llama_base_url)
+    llama_model_name = st.text_input("Model Name", value=MODEL_SAMPLING.llama_model_name)
     use_llama_server = st.toggle("Use llama-server for quiz generation", value=True)
     auto_generation_strategy, auto_generation_reason = choose_quiz_generation_mode(
         llama_model_name,
@@ -859,7 +1195,7 @@ with st.sidebar:
     )
     st.caption(auto_generation_reason)
 
-    classes = list_teacher_classes(teacher["id"])
+    classes = teacher_class_repository.list_teacher_classes(teacher["id"])
     if not classes:
         st.warning("No classes found for this teacher.")
         st.stop()
@@ -871,13 +1207,14 @@ with st.sidebar:
     )
 
 class_id = selected_class["id"]
-overview = get_class_overview(class_id)
-students = list_class_students(class_id)
-attendance_stats = get_class_attendance_stats(class_id)
-assessments = list_class_assessments(class_id)
-concept_gaps = list_class_concept_gaps(class_id)
+overview = teacher_class_repository.get_class_overview(class_id)
+students = student_repository.list_class_students(class_id)
+attendance_stats = attendance_repository.get_class_attendance_stats(class_id)
+assessments = assessment_repository.list_class_assessments(class_id)
+concept_gaps = analytics_repository.list_class_concept_gaps(class_id)
 latest_sync_result = st.session_state.get("latest_sync_result")
-class_subject_options = list_class_subjects(class_id)
+latest_attendance_result = st.session_state.get(f"attendance_result_{class_id}")
+class_subject_options = teacher_class_repository.list_class_subjects(class_id)
 current_subject_row = next(
     (item for item in class_subject_options if item["subject"] == selected_class.get("subject")),
     class_subject_options[0] if class_subject_options else {"subject": selected_class.get("subject", ""), "medium": selected_class.get("medium", "")},
@@ -897,6 +1234,66 @@ if class_subject_options:
         current_subject_row,
     )
 current_subject_medium = current_subject_row.get("medium") or selected_class.get("medium", "")
+plan_snapshot = DEFAULT_TEACHING_PLANNER_SERVICE.get_plan_snapshot(
+    class_id=class_id,
+    subject=selected_subject_name,
+    academic_year=selected_class.get("academic_year", ""),
+)
+timetable_slots = timetable_repository.list_class_timetable_slots(class_id, selected_subject_name)
+all_timetable_slots = timetable_repository.list_class_timetable_slots(class_id)
+active_timetable_slot = DEFAULT_TEACHING_PLANNER_SERVICE.find_active_timetable_slot(
+    class_id=class_id,
+    subject=selected_subject_name,
+)
+coverage_sessions = coverage_repository.list_class_coverage_sessions(
+    class_id=class_id,
+    subject=selected_subject_name,
+    limit=10,
+)
+capture_support_status = DEFAULT_TEACHING_PLANNER_SERVICE.get_capture_support_status()
+maybe_auto_stop_local_recording(class_id=class_id, subject_name=selected_subject_name)
+render_global_mic_controls(
+    class_id=class_id,
+    subject_name=selected_subject_name,
+    active_timetable_slot=active_timetable_slot,
+    capture_support_status=capture_support_status,
+)
+dashboard_date = datetime.now().date().isoformat()
+dashboard_attendance_rows = attendance_repository.list_attendance_for_date(class_id, dashboard_date)
+if (
+    latest_attendance_result
+    and latest_attendance_result.get("attendance_date") == dashboard_date
+    and latest_attendance_result.get("records")
+):
+    dashboard_attendance_rows = latest_attendance_result["records"]
+daily_dashboard_state_key = f"daily_dashboard_brief_{class_id}_{selected_subject_name}_{dashboard_date}"
+if daily_dashboard_state_key not in st.session_state:
+    cached_daily_brief = DEFAULT_DAILY_LOOP_SERVICE.load_cached_daily_dashboard_brief(
+        class_id=class_id,
+        subject_name=selected_subject_name,
+    )
+    if cached_daily_brief:
+        st.session_state[daily_dashboard_state_key] = cached_daily_brief
+    else:
+        initial_daily_brief = DEFAULT_DAILY_LOOP_SERVICE.build_local_daily_dashboard_brief(
+            selected_class=selected_class,
+            overview=overview,
+            subject_name=selected_subject_name,
+            students=students,
+            attendance_rows=dashboard_attendance_rows,
+            concept_gaps=concept_gaps,
+            assessments=assessments,
+            coverage_sessions=coverage_sessions,
+            plan_snapshot=plan_snapshot,
+            for_date=dashboard_date,
+        )
+        DEFAULT_DAILY_LOOP_SERVICE.save_cached_daily_dashboard_brief(
+            class_id=class_id,
+            subject_name=selected_subject_name,
+            brief_payload=initial_daily_brief,
+        )
+        st.session_state[daily_dashboard_state_key] = initial_daily_brief
+daily_dashboard_brief = st.session_state.get(daily_dashboard_state_key, {})
 
 metric_1, metric_2, metric_3, metric_4 = st.columns(4)
 metric_1.metric("Students", overview.get("student_count", 0))
@@ -911,6 +1308,84 @@ st.caption(
     f"Active subject workspace: {selected_subject_name or 'Not set'} | "
     f"Subject medium: {current_subject_medium or 'Not set'}"
 )
+
+brief_payload = daily_dashboard_brief.get("brief", {})
+brief_col1, brief_col2 = st.columns([2.2, 1.3])
+with brief_col1:
+    st.markdown("**Gemma Daily Loop**")
+    brief_context_date = (
+        (daily_dashboard_brief.get("context") or {}).get("date")
+        or dashboard_date
+    )
+    st.caption(
+        f"End-of-day classroom summary for {brief_context_date}. Generated by {daily_dashboard_brief.get('generated_by_model', 'fallback')}."
+    )
+    cache_metadata = daily_dashboard_brief.get("cache_metadata") or {}
+    if cache_metadata.get("saved_at"):
+        st.caption(f"Loaded from saved dashboard cache on startup. Last saved on {cache_metadata['saved_at']}.")
+    st.write(brief_payload.get("daily_summary") or "Gemma has not generated a daily summary yet.")
+    next_concept = brief_payload.get("next_concept_to_teach") or "No next concept recommendation yet."
+    st.write(f"Next concept to teach: {next_concept}")
+with brief_col2:
+    if st.button("Refresh Gemma Daily Loop", key=f"refresh_daily_loop_{class_id}_{selected_subject_name}"):
+        refreshed_daily_brief = DEFAULT_DAILY_LOOP_SERVICE.generate_daily_dashboard_brief(
+            selected_class=selected_class,
+            overview=overview,
+            subject_name=selected_subject_name,
+            students=students,
+            attendance_rows=dashboard_attendance_rows,
+            concept_gaps=concept_gaps,
+            assessments=assessments,
+            coverage_sessions=coverage_sessions,
+            plan_snapshot=plan_snapshot,
+            llama_base_url=llama_base_url,
+            llama_model_name=llama_model_name,
+            use_llama_server=use_llama_server,
+            for_date=dashboard_date,
+        )
+        DEFAULT_DAILY_LOOP_SERVICE.save_cached_daily_dashboard_brief(
+            class_id=class_id,
+            subject_name=selected_subject_name,
+            brief_payload=refreshed_daily_brief,
+        )
+        st.session_state[daily_dashboard_state_key] = refreshed_daily_brief
+        st.rerun()
+    st.metric("Plan Completion", f"{plan_snapshot.get('completion_percent', 0)}%")
+    st.metric("Present Today", sum(1 for item in dashboard_attendance_rows if item.get("status") == "present"))
+
+daily_loop_detail_col1, daily_loop_detail_col2, daily_loop_detail_col3, daily_loop_detail_col4 = st.columns(4)
+with daily_loop_detail_col1:
+    st.markdown("**Reteach Priorities**")
+    reteach_items = brief_payload.get("reteach_concepts") or []
+    if reteach_items:
+        for item in reteach_items[:4]:
+            st.write(f"- {item}")
+    else:
+        st.write("- No reteach concepts flagged.")
+with daily_loop_detail_col2:
+    st.markdown("**Speed Up**")
+    speed_up_items = brief_payload.get("speed_up_areas") or []
+    if speed_up_items:
+        for item in speed_up_items[:4]:
+            st.write(f"- {item}")
+    else:
+        st.write("- No speed-up recommendation yet.")
+with daily_loop_detail_col3:
+    st.markdown("**Watch List**")
+    watch_items = brief_payload.get("students_to_watch") or []
+    if watch_items:
+        for item in watch_items[:4]:
+            st.write(f"- {item}")
+    else:
+        st.write("- No student watch list yet.")
+with daily_loop_detail_col4:
+    st.markdown("**Teacher Actions**")
+    teacher_actions = brief_payload.get("teacher_actions") or []
+    if teacher_actions:
+        for item in teacher_actions[:4]:
+            st.write(f"- {item}")
+    else:
+        st.write("- No teacher actions yet.")
 
 if latest_sync_result and latest_sync_result.get("class_id") == class_id:
     st.success(
@@ -947,7 +1422,7 @@ if latest_sync_result and latest_sync_result.get("class_id") == class_id:
                 f"avg {student['avg_percentage'] or 0}%"
             )
 
-tab_overview, tab_quiz, tab_students, tab_class_gaps, tab_assessments, tab_attendance, tab_management, tab_materials, tab_chat = st.tabs(
+tab_overview, tab_quiz, tab_students, tab_class_gaps, tab_assessments, tab_attendance, tab_management, tab_materials, tab_planner, tab_chat = st.tabs(
     [
         "Class Overview",
         "Create Quiz",
@@ -957,25 +1432,35 @@ tab_overview, tab_quiz, tab_students, tab_class_gaps, tab_assessments, tab_atten
         "Attendance",
         "Class Management",
         "Reading Materials",
+        "Teaching Progress",
         "Chat With Gemma",
     ]
 )
 
 with tab_overview:
+    overview_attendance_date_key = f"overview_attendance_date_{class_id}"
+    overview_attendance_date_pending_key = f"overview_attendance_date_pending_{class_id}"
+    if overview_attendance_date_pending_key in st.session_state:
+        st.session_state[overview_attendance_date_key] = st.session_state.pop(overview_attendance_date_pending_key)
     overview_attendance_date_value = st.date_input(
         "Overview Attendance Date",
-        value=datetime.now().date(),
-        key=f"overview_attendance_date_{class_id}",
+        key=overview_attendance_date_key,
     )
     overview_attendance_date = format_attendance_date(overview_attendance_date_value)
-    overview_attendance_rows = list_attendance_for_date(class_id, overview_attendance_date)
+    overview_attendance_rows = attendance_repository.list_attendance_for_date(class_id, overview_attendance_date)
+    if (
+        latest_attendance_result
+        and latest_attendance_result.get("attendance_date") == overview_attendance_date
+        and latest_attendance_result.get("records")
+    ):
+        overview_attendance_rows = latest_attendance_result["records"]
     attendance_by_student_id = {
         row["student_id"]: row
         for row in overview_attendance_rows
     }
     selected_overview_student_id = st.session_state.get("overview_selected_student_id")
     if selected_overview_student_id:
-        student_detail = get_student_detail(selected_overview_student_id)
+        student_detail = student_repository.get_student_detail(selected_overview_student_id)
         student = student_detail.get("student")
         if student:
             top_col1, top_col2 = st.columns([1, 4])
@@ -1077,7 +1562,7 @@ with tab_overview:
                     if st.button("Regenerate Adaptation Profile", key=f"regenerate_profile_{student['id']}"):
                         try:
                             client = LlamaServerClient(LlamaServerConfig(base_url=llama_base_url))
-                            context = get_student_adaptation_profile_context(student["id"], selected_profile_subject or student["subject"])
+                            context = student_repository.get_student_adaptation_profile_context(student["id"], selected_profile_subject or student["subject"])
                             generated_profile = generate_student_adaptation_profile_with_gemma(
                                 client=client,
                                 model_name=llama_model_name,
@@ -1092,7 +1577,7 @@ with tab_overview:
                                 "intervention_history": context.get("intervention_history", []),
                                 **generated_profile,
                             }
-                            upsert_student_adaptation_profile(
+                            student_repository.upsert_student_adaptation_profile(
                                 student_id=student["id"],
                                 class_id=class_id,
                                 subject=selected_profile_subject or student["subject"],
@@ -1168,18 +1653,30 @@ with tab_overview:
                     type="primary",
                 ):
                     topic = build_student_quiz_topic(student_detail, selected_profile_subject)
-                    learner_profile = (
-                        ((adaptation_profile or {}).get("summary"))
-                        or (get_subject_blueprint(student_detail, selected_profile_subject) or {}).get("narrative")
-                        or "Target weak concepts and reinforce understanding."
+                    student_adaptation_context = student_repository.get_student_adaptation_profile_context(
+                        student["id"],
+                        selected_profile_subject or student["subject"],
                     )
                     personalized_questions = None
                     personalized_note = "Generated using local mock logic."
+                    personalized_retrieval_query = build_student_retrieval_query(
+                        subject=selected_profile_subject or student["subject"],
+                        topic_hint=topic,
+                        adaptation_profile=adaptation_profile,
+                        student_context=student_adaptation_context,
+                    )
                     personalized_rag_context = build_retrieval_context(
                         grade=student["grade"],
                         subject=selected_profile_subject or student["subject"],
-                        query=f"{topic} {learner_profile}",
+                        query=personalized_retrieval_query,
                         top_k=MODEL_SAMPLING.rag_top_k,
+                    )
+                    learner_profile, personalized_source_material = build_student_generation_context(
+                        subject=selected_profile_subject or student["subject"],
+                        topic_hint=topic,
+                        adaptation_profile=adaptation_profile,
+                        student_context=student_adaptation_context,
+                        retrieval_context=personalized_rag_context,
                     )
                     if use_llama_server:
                         client = LlamaServerClient(LlamaServerConfig(base_url=llama_base_url))
@@ -1193,11 +1690,7 @@ with tab_overview:
                                 grade=student["grade"],
                                 chapter_name=topic,
                                 learner_profile=learner_profile,
-                                source_material=(
-                                    "Generate a personalized remedial quiz from this student's strengths, "
-                                    "weaknesses, and misconceptions.\n\n"
-                                    f"Retrieved subject material:\n{personalized_rag_context}"
-                                ),
+                                source_material=personalized_source_material,
                                 teacher_instructions=student_teacher_instructions,
                                 language=student_quiz_language.strip() or "English",
                                 question_count=5,
@@ -1250,9 +1743,9 @@ with tab_overview:
                     try:
                         from app.google_forms import create_google_form_quiz
 
-                        student_chapters = list_chapters_for_class(class_id)
+                        student_chapters = curriculum_repository.list_chapters_for_class(class_id)
                         chapter_id = student_chapters[0]["id"] if student_chapters else preview["chapter_id"] if "preview" in locals() else 1
-                        assessment_id = create_assessment(
+                        assessment_id = assessment_repository.create_assessment(
                             class_id=class_id,
                             chapter_id=chapter_id,
                             teacher_id=teacher["id"],
@@ -1267,7 +1760,7 @@ with tab_overview:
                             description=f"Personalized quiz for {student['full_name']}",
                             questions=personalized_quiz["questions"],
                         )
-                        update_assessment_google_form_info(
+                        assessment_repository.update_assessment_google_form_info(
                             assessment_id=assessment_id,
                             google_form_id=form_result["form_id"],
                             google_form_url=form_result["edit_uri"],
@@ -1330,36 +1823,64 @@ with tab_overview:
                     st.write(attendance_percentage_label)
 
         with right:
-            st.markdown("**Reteach Priorities**")
-            if concept_gaps:
-                for concept in concept_gaps[:3]:
-                    st.write(
-                        f"- {concept['concept_name']}: {concept['mastery_percent']}% mastery, "
-                        f"{concept['students_lagging']} students lagging"
-                    )
-            else:
-                st.info("No class mastery data yet.")
-
-            st.markdown("**Teacher Actions**")
-            st.write("- Create a quiz from the next chapter or reteach concept.")
-            st.write("- Review lagging students before the next lesson.")
-            st.write("- Use misconception trends to decide tomorrow's board explanation.")
+            st.empty()
 
 with tab_quiz:
     st.markdown("**Draft a quiz for the selected class**")
 
-    chapter_options = list_chapters_for_class(class_id, selected_subject_name)
-    if not chapter_options:
+    quiz_mode = st.radio(
+        "Quiz Target Selection",
+        options=["Manual", "Gemma Auto Select"],
+        horizontal=True,
+        key=f"quiz_target_mode_{class_id}",
+    )
+    chapter_options = curriculum_repository.list_chapters_for_class(class_id, selected_subject_name)
+    if quiz_mode == "Manual" and not chapter_options:
         st.warning("No chapters found for the selected subject and grade.")
     else:
         quiz_col1, quiz_col2 = st.columns(2)
+        auto_quiz_target = None
+        auto_subject_chapters: list[dict] = []
+        auto_generation_reason = ""
+        resolved_quiz_subject_name = selected_subject_name
         with quiz_col1:
-            selected_chapter = st.selectbox(
-                "Chapter",
-                options=chapter_options,
-                format_func=lambda chapter: chapter["chapter_name"],
-                key="quiz_chapter",
-            )
+            if quiz_mode == "Manual":
+                selected_chapter = st.selectbox(
+                    "Chapter",
+                    options=chapter_options,
+                    format_func=lambda chapter: chapter["chapter_name"],
+                    key="quiz_chapter",
+                )
+            else:
+                auto_quiz_target = choose_auto_quiz_target(
+                    class_id=class_id,
+                    class_row=selected_class,
+                    class_subjects=class_subject_options,
+                    llama_base_url=llama_base_url,
+                    llama_model_name=llama_model_name,
+                    use_llama_server=use_llama_server,
+                )
+                resolved_quiz_subject_name = auto_quiz_target.get("subject") or selected_subject_name
+                auto_subject_chapters = curriculum_repository.list_chapters_for_class(class_id, resolved_quiz_subject_name)
+                selected_chapter = next(
+                    (
+                        chapter
+                        for chapter in auto_subject_chapters
+                        if str(chapter.get("chapter_name") or "").strip().lower() == auto_quiz_target.get("topic", "").strip().lower()
+                    ),
+                    auto_subject_chapters[0] if auto_subject_chapters else {"id": 0, "chapter_name": auto_quiz_target.get("topic", "Concept revision")},
+                )
+                auto_generation_reason = auto_quiz_target.get("reason", "")
+                st.caption(
+                    f"Gemma selected subject: {resolved_quiz_subject_name} | topic: {selected_chapter['chapter_name']}"
+                )
+                if auto_generation_reason:
+                    st.caption(auto_generation_reason)
+                if not auto_subject_chapters:
+                    st.warning(
+                        f"No chapter records exist yet for auto-selected subject '{resolved_quiz_subject_name}'. "
+                        "Import the syllabus first or add chapters for that subject."
+                    )
             quiz_title = st.text_input(
                 "Quiz Title",
                 value=f"{selected_chapter['chapter_name']} Quick Check",
@@ -1399,13 +1920,17 @@ with tab_quiz:
             st.caption(f"Selected due time: {format_date_time_preview(due_date, due_time)}")
 
         if st.button("Generate Quiz Draft", type="primary"):
+            generation_subject_name = resolved_quiz_subject_name if quiz_mode != "Manual" else selected_subject_name
+            if int(selected_chapter.get("id", 0) or 0) == 0:
+                st.error("No valid chapter mapping exists for the selected quiz target yet.")
+                st.stop()
             concept_names = [row["concept_name"] for row in concept_gaps] or [selected_chapter["chapter_name"]]
             lesson_pack = build_lesson_pack(
                 request=type(
                     "LessonRequestProxy",
                     (),
                     {
-                        "subject": selected_subject_name,
+                        "subject": generation_subject_name,
                         "grade_band": f"{selected_class['grade']}",
                         "topic": selected_chapter["chapter_name"],
                         "class_profile": learner_profile,
@@ -1422,7 +1947,7 @@ with tab_quiz:
 
             rag_context = build_retrieval_context(
                 grade=selected_class["grade"],
-                subject=selected_subject_name,
+                subject=generation_subject_name,
                 query=f"{selected_chapter['chapter_name']} {quiz_title} {learner_profile} {source_material}",
                 top_k=MODEL_SAMPLING.rag_top_k,
             )
@@ -1441,7 +1966,7 @@ with tab_quiz:
                         base_url=llama_base_url,
                         model_name=llama_model_name,
                         generation_strategy=auto_generation_strategy,
-                        subject=selected_subject_name,
+                        subject=generation_subject_name,
                         grade=selected_class["grade"],
                         chapter_name=selected_chapter["chapter_name"],
                         learner_profile=learner_profile,
@@ -1484,8 +2009,10 @@ with tab_quiz:
                 "raw_llama_outputs": raw_llama_outputs,
                 "due_at": general_due_at,
                 "topic": selected_chapter["chapter_name"],
-                "subject": selected_subject_name,
+                "subject": generation_subject_name,
                 "retrieval_context": rag_context,
+                "target_selection_mode": "auto" if quiz_mode != "Manual" else "manual",
+                "target_selection_reason": auto_generation_reason,
             }
 
     preview = st.session_state.get("quiz_preview")
@@ -1607,7 +2134,7 @@ with tab_quiz:
             action_col1, action_col2, action_col3 = st.columns(3)
             with action_col1:
                 if st.button("Save Quiz Draft To Database", use_container_width=True):
-                    assessment_id = create_assessment(
+                    assessment_id = assessment_repository.create_assessment(
                         class_id=class_id,
                         chapter_id=preview["chapter_id"],
                         teacher_id=teacher["id"],
@@ -1648,7 +2175,7 @@ with tab_quiz:
 
                         assessment_id = preview.get("assessment_id")
                         if not assessment_id:
-                            assessment_id = create_assessment(
+                            assessment_id = assessment_repository.create_assessment(
                                 class_id=class_id,
                                 chapter_id=preview["chapter_id"],
                                 teacher_id=teacher["id"],
@@ -1665,7 +2192,7 @@ with tab_quiz:
                             description=preview["teacher_summary"],
                             questions=preview["questions"],
                         )
-                        update_assessment_google_form_info(
+                        assessment_repository.update_assessment_google_form_info(
                             assessment_id=assessment_id,
                             google_form_id=form_result["form_id"],
                             google_form_url=form_result["edit_uri"],
@@ -1705,7 +2232,7 @@ with tab_students:
             options=students,
             format_func=lambda student: f"{student['roll_number']} | {student['full_name']}",
         )
-        student_detail = get_student_detail(selected_student["id"])
+        student_detail = student_repository.get_student_detail(selected_student["id"])
         student = student_detail["student"]
 
         if student:
@@ -1871,7 +2398,7 @@ with tab_assessments:
             st.write(f"Google Form: {latest['google_form_url']}")
 
     st.markdown("**Sync Google Form Responses**")
-    syncable_assessments = list_assessments_for_sync(class_id)
+    syncable_assessments = assessment_repository.list_assessments_for_sync(class_id)
     if not syncable_assessments:
         st.info("No Google Form linked assessments available for sync.")
     else:
@@ -1897,7 +2424,7 @@ with tab_assessments:
             except Exception as exc:
                 st.error(f"Failed to sync Google Form responses: {exc}")
 
-        attempted_students = list_attempted_students_for_assessment(selected_sync_assessment["id"])
+        attempted_students = assessment_repository.list_attempted_students_for_assessment(selected_sync_assessment["id"])
         if attempted_students:
             st.markdown("**Review Attempted Students**")
             selected_attempted_student = st.selectbox(
@@ -1909,7 +2436,7 @@ with tab_assessments:
                 ),
                 key="attempted_student_select",
             )
-            review = get_student_assessment_review(
+            review = assessment_repository.get_student_assessment_review(
                 selected_sync_assessment["id"],
                 selected_attempted_student["student_id"],
             )
@@ -1936,7 +2463,7 @@ with tab_assessments:
             st.info("No graded student attempts found for this assessment yet.")
 
     st.markdown("**Auto Grading Queue**")
-    queue_items = list_queue_items(limit=10)
+    queue_items = queue_repository.list_queue_items(limit=10)
     if queue_items:
         st.dataframe(
             [
@@ -1961,15 +2488,28 @@ with tab_attendance:
     st.markdown("**Attendance**")
     attendance_result_key = f"attendance_result_{class_id}"
     attendance_proposal_key = f"attendance_proposal_{class_id}"
+    overview_attendance_date_pending_key = f"overview_attendance_date_pending_{class_id}"
     attendance_date_value = st.date_input(
         "Attendance Date",
         value=datetime.now().date(),
         key=f"attendance_date_{class_id}",
     )
     attendance_date = format_attendance_date(attendance_date_value)
-    roster = list_class_roster(class_id)
-    attendance_overview = get_attendance_overview(class_id, attendance_date)
-    attendance_rows = list_attendance_for_date(class_id, attendance_date)
+    roster = student_repository.list_class_roster(class_id)
+    attendance_overview = attendance_repository.get_attendance_overview(class_id, attendance_date)
+    attendance_rows = attendance_repository.list_attendance_for_date(class_id, attendance_date)
+    if (
+        latest_attendance_result
+        and latest_attendance_result.get("attendance_date") == attendance_date
+        and latest_attendance_result.get("records")
+    ):
+        attendance_rows = latest_attendance_result["records"]
+        attendance_overview = {
+            "attendance_date": attendance_date,
+            "present_count": int(latest_attendance_result.get("present_count", 0)),
+            "absent_count": int(latest_attendance_result.get("absent_count", 0)),
+            "total_students": len(attendance_rows),
+        }
 
     metric_col1, metric_col2, metric_col3 = st.columns(3)
     metric_col1.metric("Total Students", len(roster))
@@ -1998,7 +2538,7 @@ with tab_attendance:
         )
         if st.button("Save Attendance Edit", key=f"attendance_edit_save_{class_id}"):
             if selected_attendance_student:
-                update_student_attendance_status(
+                attendance_repository.update_student_attendance_status(
                     class_id=class_id,
                     student_id=selected_attendance_student["id"],
                     teacher_id=teacher["id"],
@@ -2009,9 +2549,10 @@ with tab_attendance:
                 )
                 st.session_state[attendance_result_key] = {
                     "attendance_date": attendance_date,
-                    "present_count": get_attendance_overview(class_id, attendance_date)["present_count"],
-                    "absent_count": get_attendance_overview(class_id, attendance_date)["absent_count"],
+                    "present_count": attendance_repository.get_attendance_overview(class_id, attendance_date)["present_count"],
+                    "absent_count": attendance_repository.get_attendance_overview(class_id, attendance_date)["absent_count"],
                 }
+                st.session_state[overview_attendance_date_pending_key] = attendance_date_value
                 st.rerun()
     with edit_col2:
         clear_student_confirm = st.checkbox(
@@ -2020,7 +2561,7 @@ with tab_attendance:
         )
         if st.button("Clear Selected Student Attendance", key=f"attendance_clear_student_{class_id}"):
             if selected_attendance_student and clear_student_confirm:
-                clear_student_attendance(selected_attendance_student["id"], class_id)
+                attendance_repository.clear_student_attendance(selected_attendance_student["id"], class_id)
                 st.session_state.pop(attendance_result_key, None)
                 st.rerun()
         clear_class_confirm = st.checkbox(
@@ -2029,7 +2570,7 @@ with tab_attendance:
         )
         if st.button("Clear All Class Attendance", key=f"attendance_clear_class_{class_id}"):
             if clear_class_confirm:
-                clear_class_attendance(class_id)
+                attendance_repository.clear_class_attendance(class_id)
                 st.session_state.pop(attendance_result_key, None)
                 st.session_state.pop(attendance_proposal_key, None)
                 st.rerun()
@@ -2149,6 +2690,7 @@ with tab_attendance:
                     **latest_attendance_proposal,
                     **marked_attendance,
                 }
+                st.session_state[overview_attendance_date_pending_key] = attendance_date_value
                 st.session_state.pop(attendance_proposal_key, None)
                 st.rerun()
         with discard_col:
@@ -2156,7 +2698,6 @@ with tab_attendance:
                 st.session_state.pop(attendance_proposal_key, None)
                 st.rerun()
 
-    latest_attendance_result = st.session_state.get(attendance_result_key)
     if latest_attendance_result and latest_attendance_result.get("attendance_date") == attendance_date:
         st.success(
             f"Attendance marked for {attendance_date}. "
@@ -2174,7 +2715,7 @@ with tab_attendance:
             st.code(latest_attendance_result.get("raw_model_output", ""))
 
     st.markdown("**Attendance Register**")
-    current_rows = list_attendance_for_date(class_id, attendance_date)
+    current_rows = attendance_repository.list_attendance_for_date(class_id, attendance_date)
     if current_rows:
         st.dataframe(
             [
@@ -2202,16 +2743,16 @@ with tab_management:
     st.markdown("**Class Management**")
     management_mode_key = f"class_management_mode_{teacher['id']}"
     managed_class_id = selected_class["id"]
-    class_subjects = list_class_subjects(managed_class_id)
+    class_subjects = teacher_class_repository.list_class_subjects(managed_class_id)
     selected_management_subject = st.selectbox(
         "Subject Workspace",
         options=class_subjects,
         format_func=lambda item: item["subject"],
         key=f"management_workspace_{teacher['id']}",
     ) if class_subjects else None
-    management_roster = list_class_roster(managed_class_id)
-    inactive_students = list_inactive_class_students(managed_class_id)
-    current_management_chapters = list_chapters_for_class(
+    management_roster = student_repository.list_class_roster(managed_class_id)
+    inactive_students = student_repository.list_inactive_class_students(managed_class_id)
+    current_management_chapters = curriculum_repository.list_chapters_for_class(
         managed_class_id,
         selected_management_subject["subject"] if selected_management_subject else None,
     )
@@ -2261,7 +2802,7 @@ with tab_management:
             create_class_submitted = st.form_submit_button("Create Subject")
         if create_class_submitted:
             try:
-                add_subject_to_class(class_id=managed_class_id, subject=new_subject, medium=new_medium)
+                teacher_class_repository.add_subject_to_class(class_id=managed_class_id, subject=new_subject, medium=new_medium)
                 st.success("Subject created.")
                 st.session_state[management_mode_key] = ""
                 st.rerun()
@@ -2277,7 +2818,7 @@ with tab_management:
                 edit_class_submitted = st.form_submit_button("Save Subject Changes")
             if edit_class_submitted:
                 try:
-                    update_class_subject_details(
+                    teacher_class_repository.update_class_subject_details(
                         class_subject_id=selected_management_subject["id"],
                         subject=edit_subject,
                         medium=edit_medium,
@@ -2304,7 +2845,7 @@ with tab_management:
                 add_student_submitted = st.form_submit_button("Add Student")
             if add_student_submitted:
                 try:
-                    add_student_to_class(
+                    student_repository.add_student_to_class(
                         class_id=managed_class_id,
                         roll_number=new_roll_number,
                         full_name=new_student_name,
@@ -2325,7 +2866,7 @@ with tab_management:
                     format_func=lambda item: f"{item['roll_number']} | {item['full_name']}",
                     key=f"edit_student_select_{managed_class_id}",
                 )
-                selected_edit_student_detail = get_student_detail(selected_edit_student["id"]).get("student") if selected_edit_student else None
+                selected_edit_student_detail = student_repository.get_student_detail(selected_edit_student["id"]).get("student") if selected_edit_student else None
                 with st.form(f"edit_student_form_{managed_class_id}_{selected_edit_student['id']}"):
                     edit_student_roll = st.text_input("Roll Number", value=selected_edit_student_detail["roll_number"] if selected_edit_student_detail else "")
                     edit_student_name = st.text_input("Student Name", value=selected_edit_student_detail["full_name"] if selected_edit_student_detail else "")
@@ -2335,7 +2876,7 @@ with tab_management:
                     edit_student_submitted = st.form_submit_button("Save Student Changes")
                 if edit_student_submitted:
                     try:
-                        update_student_details(
+                        student_repository.update_student_details(
                             student_id=selected_edit_student["id"],
                             roll_number=edit_student_roll,
                             full_name=edit_student_name,
@@ -2365,7 +2906,7 @@ with tab_management:
                 if st.button("Remove Student", key=f"remove_student_button_{managed_class_id}"):
                     if remove_student_confirm:
                         try:
-                            deactivate_student(selected_manage_student["id"])
+                            student_repository.deactivate_student(selected_manage_student["id"])
                             st.success("Student removed from active roster.")
                             st.rerun()
                         except Exception as exc:
@@ -2385,7 +2926,7 @@ with tab_management:
                 )
                 if st.button("Restore Student", key=f"restore_student_button_{managed_class_id}"):
                     try:
-                        reactivate_student(selected_inactive_student["id"])
+                        student_repository.reactivate_student(selected_inactive_student["id"])
                         st.success("Student restored to active roster.")
                         st.rerun()
                     except Exception as exc:
@@ -2414,7 +2955,7 @@ with tab_management:
                 try:
                     if not selected_management_subject:
                         raise ValueError("Select a subject workspace first.")
-                    create_chapter_for_class(
+                    curriculum_repository.create_chapter_for_class(
                         class_id=managed_class_id,
                         subject=selected_management_subject["subject"],
                         chapter_code=chapter_code_value,
@@ -2441,7 +2982,7 @@ with tab_management:
                     edit_chapter_submitted = st.form_submit_button("Save Chapter Changes")
                 if edit_chapter_submitted:
                     try:
-                        update_chapter_details(
+                        curriculum_repository.update_chapter_details(
                             chapter_id=selected_chapter["id"],
                             chapter_code=edit_chapter_code,
                             chapter_name=edit_chapter_name,
@@ -2468,7 +3009,7 @@ with tab_management:
                 )
                 if st.button("Delete Chapter", key=f"delete_chapter_button_{managed_class_id}"):
                     if delete_chapter_confirm:
-                        deleted, message = delete_chapter_if_unused(selected_delete_chapter["id"])
+                        deleted, message = curriculum_repository.delete_chapter_if_unused(selected_delete_chapter["id"])
                         if deleted:
                             st.success(message)
                             st.rerun()
@@ -2487,15 +3028,15 @@ with tab_materials:
     st.caption(
         "Upload books, notes, or images for the selected grade. Subjects and chapters are extracted automatically and shared across sections of the same grade."
     )
-    grade_subjects = list_grade_curriculum_subjects(selected_class["grade"])
-    current_curriculum_subject = get_curriculum_subject(grade=selected_class["grade"], subject=selected_subject_name)
+    grade_subjects = curriculum_repository.list_grade_curriculum_subjects(selected_class["grade"])
+    current_curriculum_subject = curriculum_repository.get_curriculum_subject(grade=selected_class["grade"], subject=selected_subject_name)
     current_curriculum_chapters = (
-        list_curriculum_chapters(current_curriculum_subject["id"])
+        curriculum_repository.list_curriculum_chapters(current_curriculum_subject["id"])
         if current_curriculum_subject
         else []
     )
-    materials = list_subject_materials(grade=selected_class["grade"], subject=selected_subject_name) if selected_subject_name else []
-    ingestion_runs = list_recent_ingestion_runs(limit=10)
+    materials = material_repository.list_subject_materials(grade=selected_class["grade"], subject=selected_subject_name) if selected_subject_name else []
+    ingestion_runs = material_repository.list_recent_ingestion_runs(limit=10)
 
     material_col1, material_col2 = st.columns([2, 1])
     with material_col1:
@@ -2563,6 +3104,8 @@ with tab_materials:
                     f"Ingested material for {result['subject']}. "
                     f"Created or updated {len(result['chapters'])} chapters and indexed {result['indexed_count']} chunks."
                 )
+                if result.get("embedding_warning"):
+                    st.warning(result["embedding_warning"])
                 st.rerun()
             except Exception as exc:
                 st.error(f"Failed to ingest reading material: {exc}")
@@ -2640,6 +3183,519 @@ with tab_materials:
     else:
         st.info("No ingestion runs yet.")
 
+with tab_planner:
+    st.markdown("**AI Teaching Progress Tracker**")
+    st.caption(
+        "Create a yearly subject plan, map weekly periods, and process classroom recordings so Gemma can update what was actually taught and suggest the next sessions automatically."
+    )
+    if plan_snapshot.get("plan"):
+        planner_metric_1, planner_metric_2, planner_metric_3 = st.columns(3)
+        planner_metric_1.metric("Plan Completion", f"{plan_snapshot.get('completion_percent', 0)}%")
+        planner_metric_2.metric("Upcoming Units", len(plan_snapshot.get("upcoming_units", [])))
+        planner_metric_3.metric("Recorded Sessions", len(coverage_sessions))
+    else:
+        st.info("No academic year plan exists yet for this class subject.")
+
+    if active_timetable_slot:
+        st.caption(
+            f"Active scheduled period detected: {WEEKDAY_LABELS.get(int(active_timetable_slot['weekday']), 'Day')} "
+            f"{active_timetable_slot['start_time']}-{active_timetable_slot['end_time']} for {selected_subject_name}."
+        )
+    else:
+        st.caption("No active scheduled period is detected right now for this subject.")
+
+    if capture_support_status.get("automatic_capture_available"):
+        st.caption(capture_support_status["reason"])
+    else:
+        st.warning(capture_support_status["reason"])
+
+    planner_setup_tab, planner_schedule_tab, planner_coverage_tab, planner_next_tab = st.tabs(
+        ["Year Plan", "Timetable", "Process Class", "Next Classes"]
+    )
+
+    with planner_setup_tab:
+        existing_plan = plan_snapshot.get("plan")
+        syllabus_state_key = f"planner_syllabus_text_{class_id}_{selected_subject_name}"
+        if syllabus_state_key not in st.session_state:
+            st.session_state[syllabus_state_key] = (existing_plan or {}).get("raw_syllabus_text", "")
+        uploaded_syllabus_file = st.file_uploader(
+            "Upload full grade syllabus as PDF or image",
+            type=["pdf", "png", "jpg", "jpeg", "webp"],
+            key=f"planner_syllabus_file_{class_id}_{selected_subject_name}",
+        )
+        extract_syllabus = st.button(
+            "Extract Grade Syllabus Text",
+            key=f"planner_extract_syllabus_{class_id}_{selected_subject_name}",
+            disabled=not uploaded_syllabus_file,
+        )
+        if extract_syllabus and uploaded_syllabus_file:
+            try:
+                st.session_state[syllabus_state_key] = DEFAULT_TEACHING_PLANNER_SERVICE.extract_uploaded_text(
+                    content_bytes=uploaded_syllabus_file.getvalue(),
+                    mime_type=uploaded_syllabus_file.type or "",
+                    original_filename=uploaded_syllabus_file.name,
+                    llama_base_url=llama_base_url,
+                    llama_model_name=llama_model_name,
+                    use_llama_server=use_llama_server,
+                )
+                st.success("Syllabus text extracted from file.")
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Failed to extract syllabus text: {exc}")
+        import_full_grade_syllabus = st.button(
+            "Import Whole Grade Syllabus Into Subjects",
+            key=f"planner_import_full_grade_syllabus_{class_id}_{selected_subject_name}",
+            disabled=not st.session_state.get(syllabus_state_key, "").strip(),
+        )
+        if import_full_grade_syllabus:
+            try:
+                import_result = DEFAULT_TEACHING_PLANNER_SERVICE.import_grade_syllabus_document(
+                    teacher_id=teacher["id"],
+                    class_id=class_id,
+                    academic_year=selected_class.get("academic_year", ""),
+                    grade=selected_class["grade"],
+                    board_type="CBSE",
+                    syllabus_text=st.session_state.get(syllabus_state_key, ""),
+                    llama_base_url=llama_base_url,
+                    llama_model_name=llama_model_name,
+                    use_llama_server=use_llama_server,
+                )
+                st.session_state[f"planner_grade_syllabus_import_{class_id}"] = import_result
+                st.success(f"Imported {import_result['subject_count']} subjects from the grade syllabus.")
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Failed to import the grade syllabus: {exc}")
+        latest_grade_syllabus_import = st.session_state.get(f"planner_grade_syllabus_import_{class_id}")
+        if latest_grade_syllabus_import:
+            with st.expander("Latest Grade Syllabus Import", expanded=False):
+                for item in latest_grade_syllabus_import.get("subjects_imported", []):
+                    st.write(
+                        f"- {item['subject']}: {item['units_count']} chapters | "
+                        f"{', '.join(item['chapter_names'][:4])}"
+                    )
+        with st.form(f"academic_year_plan_form_{class_id}_{selected_subject_name}"):
+            syllabus_text = st.text_area(
+                "Paste or edit syllabus text",
+                value=st.session_state.get(syllabus_state_key, ""),
+                height=220,
+                placeholder="Paste the full grade syllabus or a single-subject syllabus here.",
+            )
+            generate_plan = st.form_submit_button("Generate Or Refresh Year Plan", type="primary")
+        if generate_plan:
+            try:
+                st.session_state[syllabus_state_key] = syllabus_text
+                DEFAULT_TEACHING_PLANNER_SERVICE.generate_year_plan(
+                    teacher_id=teacher["id"],
+                    class_id=class_id,
+                    academic_year=selected_class.get("academic_year", ""),
+                    grade=selected_class["grade"],
+                    subject=selected_subject_name,
+                    board_type="CBSE",
+                    syllabus_text=syllabus_text,
+                    llama_base_url=llama_base_url,
+                    llama_model_name=llama_model_name,
+                    use_llama_server=use_llama_server,
+                )
+                st.success("Academic year plan generated.")
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Failed to generate year plan: {exc}")
+
+        refreshed_plan = planning_repository.get_active_academic_year_plan(
+            class_id=class_id,
+            subject=selected_subject_name,
+            academic_year=selected_class.get("academic_year", ""),
+        )
+        if refreshed_plan:
+            refreshed_units = planning_repository.list_academic_year_plan_units(int(refreshed_plan["id"]))
+            st.markdown(f"**{refreshed_plan.get('plan_title') or 'Academic Year Plan'}**")
+            st.dataframe(
+                [
+                    {
+                        "Order": item["sequence_order"],
+                        "Chapter": item["chapter_name"],
+                        "Subtopics": ", ".join(item.get("subtopics", [])[:5]),
+                        "Recommended Sessions": item["recommended_sessions"],
+                        "Completion %": item["completion_percent"],
+                        "Status": item["status"],
+                    }
+                    for item in refreshed_units
+                ],
+                use_container_width=True,
+                hide_index=True,
+            )
+
+    with planner_schedule_tab:
+        uploaded_timetable_file = st.file_uploader(
+            "Upload whole weekly timetable as PDF or image",
+            type=["pdf", "png", "jpg", "jpeg", "webp"],
+            key=f"planner_timetable_file_{class_id}_{selected_subject_name}",
+        )
+        import_timetable = st.button(
+            "Import Whole Timetable Grid",
+            key=f"planner_import_timetable_{class_id}_{selected_subject_name}",
+            disabled=not uploaded_timetable_file,
+        )
+        if import_timetable and uploaded_timetable_file:
+            try:
+                timetable_text = DEFAULT_TEACHING_PLANNER_SERVICE.extract_uploaded_text(
+                    content_bytes=uploaded_timetable_file.getvalue(),
+                    mime_type=uploaded_timetable_file.type or "",
+                    original_filename=uploaded_timetable_file.name,
+                    llama_base_url=llama_base_url,
+                    llama_model_name=llama_model_name,
+                    use_llama_server=use_llama_server,
+                )
+                imported_slots = DEFAULT_TEACHING_PLANNER_SERVICE.import_timetable_grid_document(
+                    class_id=class_id,
+                    grade=selected_class["grade"],
+                    timetable_text=timetable_text,
+                    llama_base_url=llama_base_url,
+                    llama_model_name=llama_model_name,
+                    use_llama_server=use_llama_server,
+                )
+                st.session_state[f"planner_timetable_extracted_{class_id}_{selected_subject_name}"] = timetable_text
+                st.success(f"Imported {len(imported_slots)} timetable slot(s) across subjects.")
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Failed to import timetable: {exc}")
+        extracted_timetable_text = st.session_state.get(f"planner_timetable_extracted_{class_id}_{selected_subject_name}", "")
+        if extracted_timetable_text:
+            with st.expander("Extracted Timetable Text", expanded=False):
+                st.text(extracted_timetable_text)
+        with st.form(f"planner_timetable_form_{class_id}_{selected_subject_name}"):
+            schedule_col1, schedule_col2, schedule_col3, schedule_col4 = st.columns(4)
+            with schedule_col1:
+                weekday_label = st.selectbox(
+                    "Weekday",
+                    options=[label for _, label in WEEKDAY_OPTIONS],
+                    key=f"planner_weekday_{class_id}_{selected_subject_name}",
+                )
+            with schedule_col2:
+                slot_start = st.text_input(
+                    "Start Time",
+                    value="09:00",
+                    key=f"planner_slot_start_{class_id}_{selected_subject_name}",
+                )
+            with schedule_col3:
+                slot_end = st.text_input(
+                    "End Time",
+                    value="09:45",
+                    key=f"planner_slot_end_{class_id}_{selected_subject_name}",
+                )
+            with schedule_col4:
+                auto_record_enabled = st.checkbox(
+                    "Auto-record target",
+                    value=True,
+                    key=f"planner_auto_record_{class_id}_{selected_subject_name}",
+                )
+            save_slot = st.form_submit_button("Add Timetable Slot", type="primary")
+        if save_slot:
+            try:
+                weekday_value = next(key for key, label in WEEKDAY_OPTIONS if label == weekday_label)
+                DEFAULT_TEACHING_PLANNER_SERVICE.add_timetable_slot(
+                    class_id=class_id,
+                    subject=selected_subject_name,
+                    weekday=weekday_value,
+                    start_time=slot_start,
+                    end_time=slot_end,
+                    auto_record_enabled=auto_record_enabled,
+                )
+                st.success("Timetable slot saved.")
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Failed to save timetable slot: {exc}")
+
+        if timetable_slots:
+            st.markdown("**Saved Weekly Slots For Current Subject**")
+            for slot in timetable_slots:
+                slot_col1, slot_col2 = st.columns([6, 1])
+                with slot_col1:
+                    st.write(
+                        f"{WEEKDAY_LABELS.get(int(slot['weekday']), 'Day')} | {slot['start_time']}-{slot['end_time']} | "
+                        f"{'Auto-record target' if slot['auto_record_enabled'] else 'Manual only'}"
+                    )
+                with slot_col2:
+                    if st.button("Delete", key=f"delete_timetable_slot_{slot['id']}"):
+                        DEFAULT_TEACHING_PLANNER_SERVICE.delete_timetable_slot(int(slot["id"]))
+                        st.rerun()
+        else:
+            st.info("No timetable slots saved for this subject yet.")
+        if all_timetable_slots:
+            st.markdown("**All Imported Timetable Slots**")
+            st.dataframe(
+                [
+                    {
+                        "Subject": slot["subject"],
+                        "Weekday": WEEKDAY_LABELS.get(int(slot["weekday"]), "Day"),
+                        "Start": slot["start_time"],
+                        "End": slot["end_time"],
+                        "Auto Record": "Yes" if slot.get("auto_record_enabled") else "No",
+                    }
+                    for slot in all_timetable_slots
+                ],
+                use_container_width=True,
+                hide_index=True,
+            )
+
+    with planner_coverage_tab:
+        st.caption(
+            "Use the current subject workspace or timetable slot as the subject context. "
+            "Raw audio is processed and then discarded; only transcript and coverage summary are kept."
+        )
+        planner_local_audio_bytes_key = f"planner_local_audio_bytes_{class_id}_{selected_subject_name}"
+        planner_local_audio_mime_key = f"planner_local_audio_mime_{class_id}_{selected_subject_name}"
+        planner_auto_capture_key = f"planner_auto_capture_{class_id}_{selected_subject_name}"
+        recorder_status = DEFAULT_TEACHING_PLANNER_SERVICE.get_local_recorder_status()
+        recorder_session = recorder_status.get("session") or {}
+
+        if (
+            recorder_status.get("active")
+            and recorder_session.get("class_id") == class_id
+            and recorder_session.get("subject") == selected_subject_name
+            and recorder_session.get("scheduled_end")
+        ):
+            try:
+                stop_deadline = datetime.strptime(
+                    f"{datetime.now().date().isoformat()} {recorder_session['scheduled_end']}",
+                    "%Y-%m-%d %H:%M",
+                )
+                if datetime.now() >= stop_deadline + timedelta(minutes=5):
+                    finished_capture = DEFAULT_TEACHING_PLANNER_SERVICE.stop_local_microphone_recording()
+                    st.session_state[planner_local_audio_bytes_key] = finished_capture["audio_bytes"]
+                    st.session_state[planner_local_audio_mime_key] = finished_capture["audio_mime_type"]
+                    st.info("Local microphone recording auto-stopped 5 minutes after the scheduled end time.")
+                    st.rerun()
+            except Exception:
+                pass
+
+        if capture_support_status.get("automatic_capture_available"):
+            auto_capture_enabled = st.checkbox(
+                "Use sounddevice local microphone recording for active timetable slots",
+                value=st.session_state.get(planner_auto_capture_key, True),
+                key=planner_auto_capture_key,
+            )
+            if (
+                auto_capture_enabled
+                and active_timetable_slot
+                and active_timetable_slot.get("auto_record_enabled")
+                and not recorder_status.get("active")
+            ):
+                try:
+                    DEFAULT_TEACHING_PLANNER_SERVICE.start_local_microphone_recording(
+                        class_id=class_id,
+                        subject=selected_subject_name,
+                        timetable_slot_id=int(active_timetable_slot["id"]),
+                        scheduled_end=str(active_timetable_slot.get("end_time") or ""),
+                    )
+                    st.info("Started sounddevice local microphone recording for the active timetable slot.")
+                    st.rerun()
+                except Exception as exc:
+                    st.warning(f"Could not auto-start local microphone recording: {exc}")
+
+            local_record_col1, local_record_col2, local_record_col3 = st.columns(3)
+            with local_record_col1:
+                if st.button(
+                    "Start Local Mic Recording",
+                    key=f"planner_start_local_mic_{class_id}_{selected_subject_name}",
+                    disabled=bool(recorder_status.get("active")),
+                ):
+                    try:
+                        DEFAULT_TEACHING_PLANNER_SERVICE.start_local_microphone_recording(
+                            class_id=class_id,
+                            subject=selected_subject_name,
+                            timetable_slot_id=int(active_timetable_slot["id"]) if active_timetable_slot else None,
+                            scheduled_end=str((active_timetable_slot or {}).get("end_time") or ""),
+                        )
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(f"Failed to start local microphone recording: {exc}")
+            with local_record_col2:
+                if st.button(
+                    "Stop Local Mic Recording",
+                    key=f"planner_stop_local_mic_{class_id}_{selected_subject_name}",
+                    disabled=not bool(recorder_status.get("active")),
+                ):
+                    try:
+                        finished_capture = DEFAULT_TEACHING_PLANNER_SERVICE.stop_local_microphone_recording()
+                        st.session_state[planner_local_audio_bytes_key] = finished_capture["audio_bytes"]
+                        st.session_state[planner_local_audio_mime_key] = finished_capture["audio_mime_type"]
+                        st.success("Local microphone recording saved to the current class session.")
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(f"Failed to stop local microphone recording: {exc}")
+            with local_record_col3:
+                if st.button(
+                    "Clear Local Mic Clip",
+                    key=f"planner_clear_local_mic_{class_id}_{selected_subject_name}",
+                    disabled=planner_local_audio_bytes_key not in st.session_state,
+                ):
+                    st.session_state.pop(planner_local_audio_bytes_key, None)
+                    st.session_state.pop(planner_local_audio_mime_key, None)
+                    st.rerun()
+
+            if recorder_status.get("active") and recorder_session.get("class_id") == class_id:
+                st.caption(
+                    f"Local microphone recording is active for {recorder_session.get('subject', selected_subject_name)} "
+                    f"since {recorder_session.get('started_at', '')}."
+                )
+
+            if st.session_state.get(planner_local_audio_bytes_key):
+                st.audio(st.session_state[planner_local_audio_bytes_key], format="audio/wav")
+                st.caption(
+                    f"Stored local microphone clip: {len(st.session_state[planner_local_audio_bytes_key])} bytes | audio/wav"
+                )
+
+        with st.form(f"planner_coverage_form_{class_id}_{selected_subject_name}"):
+            coverage_date = st.date_input(
+                "Session Date",
+                value=datetime.now().date(),
+                key=f"planner_coverage_date_{class_id}_{selected_subject_name}",
+            )
+            coverage_col1, coverage_col2 = st.columns(2)
+            with coverage_col1:
+                scheduled_start_input = st.text_input(
+                    "Scheduled Start",
+                    value=(active_timetable_slot or {}).get("start_time", ""),
+                    key=f"planner_scheduled_start_{class_id}_{selected_subject_name}",
+                )
+                actual_start_input = st.text_input(
+                    "Actual Start",
+                    value="",
+                    key=f"planner_actual_start_{class_id}_{selected_subject_name}",
+                )
+            with coverage_col2:
+                scheduled_end_input = st.text_input(
+                    "Scheduled End",
+                    value=(active_timetable_slot or {}).get("end_time", ""),
+                    key=f"planner_scheduled_end_{class_id}_{selected_subject_name}",
+                )
+                actual_end_input = st.text_input(
+                    "Actual End",
+                    value="",
+                    key=f"planner_actual_end_{class_id}_{selected_subject_name}",
+                )
+            teacher_note = st.text_area(
+                "Optional teacher note",
+                height=120,
+                placeholder="Add a short recap if the recording is noisy or if you want to mention unfinished parts of the lesson.",
+            )
+            recorded_class_audio = st.audio_input(
+                "Record classroom audio",
+                key=f"planner_audio_input_{class_id}_{selected_subject_name}",
+            )
+            uploaded_class_audio = st.file_uploader(
+                "Or upload recorded classroom audio",
+                type=["wav", "mp3", "ogg", "m4a", "webm"],
+                key=f"planner_audio_upload_{class_id}_{selected_subject_name}",
+            )
+            process_session = st.form_submit_button("Process Class Session", type="primary")
+        if process_session:
+            try:
+                audio_bytes = b""
+                audio_mime_type = "audio/wav"
+                if st.session_state.get(planner_local_audio_bytes_key):
+                    audio_bytes = st.session_state[planner_local_audio_bytes_key]
+                    audio_mime_type = st.session_state.get(planner_local_audio_mime_key, "audio/wav")
+                elif recorded_class_audio:
+                    audio_bytes = recorded_class_audio.getvalue()
+                    audio_mime_type = recorded_class_audio.type or "audio/wav"
+                elif uploaded_class_audio:
+                    audio_bytes = uploaded_class_audio.getvalue()
+                    audio_mime_type = uploaded_class_audio.type or "audio/wav"
+                result = DEFAULT_TEACHING_PLANNER_SERVICE.process_class_session(
+                    class_id=class_id,
+                    teacher_id=teacher["id"],
+                    subject=selected_subject_name,
+                    academic_year=selected_class.get("academic_year", ""),
+                    session_date=coverage_date.isoformat(),
+                    teacher_note=teacher_note,
+                    audio_bytes=audio_bytes,
+                    audio_mime_type=audio_mime_type,
+                    llama_base_url=llama_base_url,
+                    llama_model_name=llama_model_name,
+                    use_llama_server=use_llama_server,
+                    scheduled_start=scheduled_start_input,
+                    scheduled_end=scheduled_end_input,
+                    actual_start=actual_start_input,
+                    actual_end=actual_end_input,
+                    timetable_slot_id=int(active_timetable_slot["id"]) if active_timetable_slot else None,
+                )
+                st.session_state[f"planner_result_{class_id}_{selected_subject_name}"] = result
+                st.session_state.pop(planner_local_audio_bytes_key, None)
+                st.session_state.pop(planner_local_audio_mime_key, None)
+                st.success("Class session processed and teaching plan updated.")
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Failed to process class session: {exc}")
+
+        latest_planner_result = st.session_state.get(f"planner_result_{class_id}_{selected_subject_name}")
+        if latest_planner_result:
+            st.markdown("**Latest Coverage Update**")
+            st.caption(
+                f"Updated chapter: {latest_planner_result['updated_unit']['chapter_name']} | "
+                f"confidence {round(latest_planner_result['coverage_confidence'] * 100, 1)}%"
+            )
+            if latest_planner_result.get("coverage_summary"):
+                st.write(latest_planner_result["coverage_summary"])
+            if latest_planner_result.get("teacher_transcript"):
+                with st.expander("Teacher Transcript", expanded=False):
+                    st.write(latest_planner_result["teacher_transcript"])
+
+        if coverage_sessions:
+            st.markdown("**Recent Processed Sessions**")
+            for session in coverage_sessions[:5]:
+                with st.expander(
+                    f"{session['session_date']} | {session.get('coverage_summary') or session.get('subject', selected_subject_name)}",
+                    expanded=False,
+                ):
+                    st.caption(
+                        f"Confidence: {round(float(session.get('confidence_score') or 0.0) * 100, 1)}% | "
+                        f"Source: {session.get('source', '')}"
+                    )
+                    if session.get("coverage_summary"):
+                        st.write(session["coverage_summary"])
+                    coverage_payload = session.get("coverage", {})
+                    if coverage_payload.get("covered_subtopics"):
+                        st.write(f"Covered: {', '.join(coverage_payload['covered_subtopics'])}")
+                    if session.get("transcript_text"):
+                        st.caption("Stored Transcript")
+                        st.text_area(
+                            "Stored Transcript",
+                            value=session["transcript_text"],
+                            height=140,
+                            disabled=True,
+                            key=f"coverage_transcript_{session['id']}",
+                            label_visibility="collapsed",
+                        )
+
+    with planner_next_tab:
+        refreshed_snapshot = DEFAULT_TEACHING_PLANNER_SERVICE.get_plan_snapshot(
+            class_id=class_id,
+            subject=selected_subject_name,
+            academic_year=selected_class.get("academic_year", ""),
+        )
+        upcoming_units = refreshed_snapshot.get("upcoming_units", [])
+        if upcoming_units:
+            st.markdown("**Recommended Upcoming Teaching Sequence**")
+            for index, unit in enumerate(upcoming_units, start=1):
+                st.write(
+                    f"{index}. {unit['chapter_name']} | completion {unit['completion_percent']}% | "
+                    f"next subtopics: {', '.join(unit.get('subtopics', [])[:4]) or 'No subtopics recorded'}"
+                )
+        else:
+            st.info("No upcoming units found yet. Create a year plan first or all units are already marked complete.")
+
+        if coverage_sessions:
+            latest_session = coverage_sessions[0]
+            latest_coverage = latest_session.get("coverage", {})
+            st.markdown("**Last Class Outcome**")
+            st.write(latest_session.get("coverage_summary") or "No summary recorded.")
+            if latest_coverage.get("mentioned_not_taught"):
+                st.write(f"Mentioned but not fully taught: {', '.join(latest_coverage['mentioned_not_taught'])}")
+            if latest_coverage.get("homework_or_next_class"):
+                st.write(f"Homework or next class cues: {', '.join(latest_coverage['homework_or_next_class'])}")
+
 with tab_chat:
     st.markdown("**Teacher Chat**")
     st.caption("Ask Gemma about this class, weak concepts, remediation, quiz design, or lesson planning.")
@@ -2651,9 +3707,13 @@ with tab_chat:
     pending_agent = st.session_state.get(pending_agent_key)
     pending_user_prompt_key = f"teacher_chat_pending_user_prompt_{class_id}"
     pending_user_prompt = st.session_state.pop(pending_user_prompt_key, None)
+    running_key = f"teacher_chat_running_{class_id}"
+    stop_requested_key = f"teacher_chat_stop_requested_{class_id}"
+    is_chat_running = bool(st.session_state.get(running_key, False))
 
     if pending_user_prompt:
         st.session_state.pop(pending_agent_key, None)
+        st.session_state[stop_requested_key] = False
         append_conversation_log("USER_INPUT", pending_user_prompt)
         chat_history.append({"role": "user", "content": pending_user_prompt})
         st.session_state[chat_history_key] = chat_history
@@ -2692,20 +3752,37 @@ with tab_chat:
         query="classroom teaching strategy remediation lesson planning quiz design chapter explanation",
         top_k=MODEL_SAMPLING.rag_top_k,
     )
+    teacher_chat_roster = student_repository.list_class_roster(class_id)
+    teacher_chat_chapters = curriculum_repository.list_chapters_for_class(class_id, selected_subject_name)
 
     if pending_user_prompt:
         try:
-            result = run_teacher_chat_tool_loop(
-                llama_base_url=llama_base_url,
-                llama_model_name=llama_model_name,
-                selected_class=selected_class,
-                overview=overview,
-                concept_gaps=concept_gaps,
-                history=chat_history,
-                max_agent_iterations=MODEL_SAMPLING.max_agent_iterations,
-                subject_name=selected_subject_name,
-                retrieval_context=teacher_chat_rag_context,
-            )
+            st.session_state[running_key] = True
+            with st.status("Gemma is reviewing class context and preparing a response.", expanded=False) as chat_status:
+                result = run_teacher_chat_tool_loop(
+                    llama_base_url=llama_base_url,
+                    llama_model_name=llama_model_name,
+                    selected_class=selected_class,
+                    overview=overview,
+                    concept_gaps=concept_gaps,
+                    roster=teacher_chat_roster,
+                    chapters=teacher_chat_chapters,
+                    history=chat_history,
+                    max_agent_iterations=MODEL_SAMPLING.max_agent_iterations,
+                    subject_name=selected_subject_name,
+                    retrieval_context=teacher_chat_rag_context,
+                    daily_brief=brief_payload,
+                )
+                if result.get("tool_trace"):
+                    chat_status.update(
+                        label=f"Gemma used {len(result['tool_trace'])} tool call(s). Streaming final answer next.",
+                        state="running",
+                    )
+                else:
+                    chat_status.update(
+                        label="Gemma prepared a direct answer. Streaming final answer next.",
+                        state="running",
+                    )
             tool_trace = result["tool_trace"]
             reasoning_trace = ""
             if result["status"] == "ready_for_final_answer":
@@ -2716,8 +3793,6 @@ with tab_chat:
                         messages=result["messages"],
                     )
                 assistant_text = streamed_text or result["assistant_text"] or "Gemma returned an empty response."
-            elif result["status"] == "completed_without_tools":
-                assistant_text = result["assistant_text"] or "Gemma returned an empty response."
             elif result["status"] == "limit_reached":
                 st.session_state[pending_agent_key] = {
                     "messages": result["messages"],
@@ -2735,6 +3810,8 @@ with tab_chat:
             assistant_text = f"Chat tool loop failed: {exc}"
             reasoning_trace = ""
             tool_trace = []
+        finally:
+            st.session_state[running_key] = False
 
         chat_history.append(
             {
@@ -2760,19 +3837,30 @@ with tab_chat:
                 type="primary",
             ):
                 try:
-                    result = run_teacher_chat_tool_loop(
-                        llama_base_url=llama_base_url,
-                        llama_model_name=llama_model_name,
-                        selected_class=selected_class,
-                        overview=overview,
-                    concept_gaps=concept_gaps,
-                    history=[],
-                    max_agent_iterations=MODEL_SAMPLING.max_agent_iterations,
-                    subject_name=selected_subject_name,
-                    retrieval_context=teacher_chat_rag_context,
-                    base_messages=pending_agent.get("messages"),
-                    prior_tool_trace=pending_agent.get("tool_trace"),
-                )
+                    st.session_state[running_key] = True
+                    st.session_state[stop_requested_key] = False
+                    with st.status("Gemma is continuing the previous run.", expanded=False) as chat_status:
+                        result = run_teacher_chat_tool_loop(
+                            llama_base_url=llama_base_url,
+                            llama_model_name=llama_model_name,
+                            selected_class=selected_class,
+                            overview=overview,
+                            concept_gaps=concept_gaps,
+                            roster=teacher_chat_roster,
+                            chapters=teacher_chat_chapters,
+                            history=[],
+                            max_agent_iterations=MODEL_SAMPLING.max_agent_iterations,
+                            subject_name=selected_subject_name,
+                            retrieval_context=teacher_chat_rag_context,
+                            daily_brief=brief_payload,
+                            base_messages=pending_agent.get("messages"),
+                            prior_tool_trace=pending_agent.get("tool_trace"),
+                        )
+                        if result.get("tool_trace"):
+                            chat_status.update(
+                                label=f"Gemma used {len(result['tool_trace'])} total tool call(s). Streaming final answer next.",
+                                state="running",
+                            )
                     if result["status"] == "ready_for_final_answer":
                         with st.chat_message("assistant"):
                             streamed_text, reasoning_trace = render_streamed_teacher_final_answer(
@@ -2789,16 +3877,6 @@ with tab_chat:
                             }
                         )
                         st.session_state.pop(pending_agent_key, None)
-                    elif result["status"] == "completed_without_tools":
-                        chat_history.append(
-                            {
-                                "role": "assistant",
-                                "content": result["assistant_text"] or "Gemma returned an empty response.",
-                                "reasoning_trace": "",
-                                "tool_trace": result["tool_trace"],
-                            }
-                        )
-                        st.session_state.pop(pending_agent_key, None)
                     else:
                         st.session_state[pending_agent_key] = {
                             "messages": result["messages"],
@@ -2808,6 +3886,8 @@ with tab_chat:
                     st.rerun()
                 except Exception as exc:
                     st.error(f"Failed to continue agent run: {exc}")
+                finally:
+                    st.session_state[running_key] = False
         with pending_col2:
             if st.button("Stop Agent Run", key=f"stop_teacher_agent_{class_id}"):
                 chat_history.append(
@@ -2822,16 +3902,73 @@ with tab_chat:
                 st.session_state[chat_history_key] = chat_history
                 st.rerun()
 
-    with st.form(key=f"teacher_chat_form_{class_id}", clear_on_submit=True):
-        user_prompt = st.text_input(
+    composer_col, send_col, stop_col = st.columns([8, 1.2, 1.2])
+    with composer_col:
+        st.text_input(
             "Ask Gemma about this class",
             value="",
             key=f"teacher_chat_input_{class_id}",
             placeholder="Ask Gemma about this class",
             label_visibility="collapsed",
         )
-        send_prompt = st.form_submit_button("Send", type="primary")
+        teacher_chat_audio = st.audio_input(
+            "Speak to Gemma",
+            key=f"teacher_chat_audio_{class_id}",
+        )
+        teacher_chat_files = st.file_uploader(
+            "Attach PDF or image for Gemma",
+            type=["pdf", "png", "jpg", "jpeg", "webp"],
+            accept_multiple_files=True,
+            key=f"teacher_chat_files_{class_id}",
+        )
+        if teacher_chat_files:
+            st.caption(
+                "Attached: " + ", ".join(file.name for file in teacher_chat_files)
+            )
+    with send_col:
+        send_prompt = st.button(
+            "Send",
+            key=f"teacher_chat_send_{class_id}",
+            type="primary",
+            use_container_width=True,
+            disabled=is_chat_running,
+        )
+    with stop_col:
+        stop_prompt = st.button(
+            "Stop",
+            key=f"teacher_chat_stop_inline_{class_id}",
+            use_container_width=True,
+            disabled=not (is_chat_running or pending_agent),
+        )
 
-    if send_prompt and user_prompt.strip():
-        st.session_state[pending_user_prompt_key] = user_prompt.strip()
+    if send_prompt:
+        try:
+            compiled_prompt = build_teacher_chat_prompt_from_inputs(
+                class_id=class_id,
+                subject_name=selected_subject_name,
+                uploaded_chat_files=teacher_chat_files,
+                recorded_chat_audio=teacher_chat_audio,
+                llama_base_url=llama_base_url,
+                llama_model_name=llama_model_name,
+                use_llama_server=use_llama_server,
+            )
+            if compiled_prompt:
+                queue_teacher_chat_prompt(class_id, compiled_prompt)
+                st.rerun()
+            else:
+                st.warning("Enter a prompt, record a voice note, or attach a PDF/image first.")
+        except Exception as exc:
+            st.error(f"Failed to prepare chat input: {exc}")
+
+    if stop_prompt:
+        stop_teacher_chat_run(class_id)
+        chat_history.append(
+            {
+                "role": "assistant",
+                "content": "Gemma run stopped.",
+                "reasoning_trace": "",
+                "tool_trace": [],
+            }
+        )
+        st.session_state[chat_history_key] = chat_history
         st.rerun()

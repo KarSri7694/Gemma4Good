@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 from pathlib import Path
+import re
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from contextlib import AsyncExitStack
@@ -9,6 +10,16 @@ from contextlib import AsyncExitStack
 sessions = {}
 tool_ids = {}
 exit_stack = None
+
+
+def _expand_env_vars(value):
+    if isinstance(value, str):
+        return re.sub(r"\$\{([^}]+)\}", lambda match: os.getenv(match.group(1), match.group(0)), value)
+    if isinstance(value, list):
+        return [_expand_env_vars(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _expand_env_vars(item) for key, item in value.items()}
+    return value
 
 
 async def start_servers(config_path: str):
@@ -19,7 +30,8 @@ async def start_servers(config_path: str):
     exit_stack = AsyncExitStack()
     await exit_stack.__aenter__()
     
-    resolved_path = Path(config_path)
+    resolved_path = Path(config_path).resolve()
+    config_dir = resolved_path.parent
     with resolved_path.open('r', encoding='utf-8') as f:
         config = json.load(f)
     
@@ -30,12 +42,20 @@ async def start_servers(config_path: str):
     for server_name, server_config in servers.items():
         print(f"Connecting to {server_name}...")
         merged_env = os.environ.copy()
-        merged_env.update(server_config.get("env") or {})
-        
+        merged_env.update(_expand_env_vars(server_config.get("env") or {}))
+        resolved_args = []
+        for arg in _expand_env_vars(server_config.get("args", [])):
+            if isinstance(arg, str):
+                candidate = (config_dir / arg).resolve()
+                if not Path(arg).is_absolute() and candidate.exists():
+                    resolved_args.append(str(candidate))
+                    continue
+            resolved_args.append(arg)
+
         # Prepare the connection parameters
         server_params = StdioServerParameters(
             command=server_config["command"],
-            args=server_config.get("args", []),
+            args=resolved_args,
             env=merged_env
         )
 

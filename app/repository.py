@@ -231,6 +231,53 @@ def list_inactive_class_students(class_id: int) -> list[dict[str, Any]]:
     return [dict(row) for row in rows]
 
 
+def find_student_id(student_name: str = "", roll_number: str = "") -> int | None:
+    normalized_name = student_name.strip().lower()
+    normalized_roll = roll_number.strip()
+    with get_connection() as connection:
+        if normalized_roll:
+            row = connection.execute(
+                """
+                SELECT id
+                FROM students
+                WHERE roll_number = ? AND status = 'active'
+                ORDER BY id
+                LIMIT 1
+                """,
+                (normalized_roll,),
+            ).fetchone()
+            if row:
+                return int(row["id"])
+
+        if normalized_name:
+            row = connection.execute(
+                """
+                SELECT id
+                FROM students
+                WHERE LOWER(full_name) = ? AND status = 'active'
+                ORDER BY id
+                LIMIT 1
+                """,
+                (normalized_name,),
+            ).fetchone()
+            if row:
+                return int(row["id"])
+
+            row = connection.execute(
+                """
+                SELECT id
+                FROM students
+                WHERE LOWER(full_name) LIKE ? AND status = 'active'
+                ORDER BY id
+                LIMIT 1
+                """,
+                (f"%{normalized_name}%",),
+            ).fetchone()
+            if row:
+                return int(row["id"])
+    return None
+
+
 def list_class_subjects(class_id: int) -> list[dict[str, Any]]:
     with get_connection() as connection:
         rows = connection.execute(
@@ -243,6 +290,106 @@ def list_class_subjects(class_id: int) -> list[dict[str, Any]]:
             (class_id,),
         ).fetchall()
     return [dict(row) for row in rows]
+
+
+def find_teacher_and_class_for_subject(subject: str) -> tuple[int | None, dict[str, Any] | None]:
+    normalized_subject = subject.strip().lower()
+    with get_connection() as connection:
+        row = connection.execute(
+            """
+            SELECT
+                t.id AS teacher_id,
+                c.id AS class_id,
+                c.grade,
+                c.section,
+                cs.subject
+            FROM classes c
+            JOIN teachers t ON t.id = c.teacher_id
+            JOIN class_subjects cs ON cs.class_id = c.id
+            WHERE LOWER(cs.subject) = ?
+            ORDER BY c.id
+            LIMIT 1
+            """,
+            (normalized_subject,),
+        ).fetchone()
+    if not row:
+        return None, None
+    return int(row["teacher_id"]), dict(row)
+
+
+def find_class_for_attendance(grade: str, section: str, subject: str) -> tuple[int | None, dict[str, Any] | None]:
+    with get_connection() as connection:
+        row = connection.execute(
+            """
+            SELECT
+                t.id AS teacher_id,
+                c.id AS class_id,
+                c.grade,
+                c.section,
+                cs.subject
+            FROM classes c
+            JOIN teachers t ON t.id = c.teacher_id
+            JOIN class_subjects cs ON cs.class_id = c.id
+            WHERE c.grade = ? AND LOWER(c.section) = ? AND LOWER(cs.subject) = ?
+            ORDER BY c.id
+            LIMIT 1
+            """,
+            (grade.strip(), section.strip().lower(), subject.strip().lower()),
+        ).fetchone()
+    if not row:
+        return None, None
+    return int(row["teacher_id"]), dict(row)
+
+
+def find_class_for_management(
+    grade: str,
+    section: str,
+    subject: str = "",
+) -> tuple[int | None, dict[str, Any] | None]:
+    normalized_subject = subject.strip().lower()
+    with get_connection() as connection:
+        if normalized_subject:
+            row = connection.execute(
+                """
+                SELECT
+                    t.id AS teacher_id,
+                    c.id AS class_id,
+                    c.grade,
+                    c.section,
+                    cs.subject,
+                    c.academic_year,
+                    COALESCE(cs.medium, c.medium) AS medium
+                FROM classes c
+                JOIN teachers t ON t.id = c.teacher_id
+                JOIN class_subjects cs ON cs.class_id = c.id
+                WHERE c.grade = ? AND LOWER(c.section) = ? AND LOWER(cs.subject) = ?
+                ORDER BY c.id
+                LIMIT 1
+                """,
+                (grade.strip(), section.strip().lower(), normalized_subject),
+            ).fetchone()
+        else:
+            row = connection.execute(
+                """
+                SELECT
+                    t.id AS teacher_id,
+                    c.id AS class_id,
+                    c.grade,
+                    c.section,
+                    c.subject,
+                    c.academic_year,
+                    c.medium
+                FROM classes c
+                JOIN teachers t ON t.id = c.teacher_id
+                WHERE c.grade = ? AND LOWER(c.section) = ?
+                ORDER BY c.id
+                LIMIT 1
+                """,
+                (grade.strip(), section.strip().lower()),
+            ).fetchone()
+    if not row:
+        return None, None
+    return int(row["teacher_id"]), dict(row)
 
 
 def list_grade_curriculum_subjects(grade: str) -> list[dict[str, Any]]:
@@ -534,6 +681,32 @@ def list_class_assessments(class_id: int) -> list[dict[str, Any]]:
             WHERE a.class_id = ?
             GROUP BY a.id, a.title, a.assessment_type, a.delivery_mode, a.language,
                      a.total_marks, a.google_form_url, a.created_at, ch.chapter_name
+            ORDER BY a.created_at DESC
+            """,
+            (class_id,),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def list_class_assessment_history(class_id: int) -> list[dict[str, Any]]:
+    with get_connection() as connection:
+        rows = connection.execute(
+            """
+            SELECT
+                a.id,
+                a.title,
+                a.assessment_type,
+                a.created_at,
+                a.due_at,
+                ch.subject,
+                ch.chapter_name,
+                ROUND(AVG(sa.percentage), 1) AS avg_percentage,
+                COUNT(sa.id) AS submissions
+            FROM assessments a
+            JOIN chapters ch ON ch.id = a.chapter_id
+            LEFT JOIN student_assessments sa ON sa.assessment_id = a.id
+            WHERE a.class_id = ?
+            GROUP BY a.id, a.title, a.assessment_type, a.created_at, a.due_at, ch.subject, ch.chapter_name
             ORDER BY a.created_at DESC
             """,
             (class_id,),
@@ -1000,6 +1173,105 @@ def list_chapters_for_class(class_id: int, subject: str | None = None) -> list[d
             (class_row["grade"], resolved_subject),
         ).fetchall()
     return [dict(row) for row in rows]
+
+
+def find_chapter_for_class_topic(class_id: int, topic: str) -> dict[str, Any] | None:
+    normalized_topic = topic.strip().lower()
+    with get_connection() as connection:
+        row = connection.execute(
+            """
+            SELECT id, chapter_name
+            FROM chapters
+            WHERE id IN (
+                SELECT ch.id
+                FROM chapters ch
+                JOIN classes c ON c.grade = ch.grade
+                JOIN class_subjects cs ON cs.class_id = c.id AND cs.subject = ch.subject
+                WHERE c.id = ?
+            )
+            AND LOWER(chapter_name) = ?
+            ORDER BY chapter_name
+            LIMIT 1
+            """,
+            (class_id, normalized_topic),
+        ).fetchone()
+        if row:
+            return dict(row)
+
+        row = connection.execute(
+            """
+            SELECT id, chapter_name
+            FROM chapters
+            WHERE id IN (
+                SELECT ch.id
+                FROM chapters ch
+                JOIN classes c ON c.grade = ch.grade
+                JOIN class_subjects cs ON cs.class_id = c.id AND cs.subject = ch.subject
+                WHERE c.id = ?
+            )
+            AND LOWER(chapter_name) LIKE ?
+            ORDER BY chapter_name
+            LIMIT 1
+            """,
+            (class_id, f"%{normalized_topic}%"),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def find_fallback_chapter_for_class(class_id: int) -> dict[str, Any] | None:
+    with get_connection() as connection:
+        row = connection.execute(
+            """
+            SELECT ch.id, ch.chapter_name
+            FROM chapters ch
+            JOIN classes c ON c.grade = ch.grade AND c.subject = ch.subject
+            WHERE c.id = ?
+            ORDER BY ch.chapter_name
+            LIMIT 1
+            """,
+            (class_id,),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def find_chapter_for_management(class_id: int, chapter_name: str) -> dict[str, Any] | None:
+    normalized_name = chapter_name.strip().lower()
+    with get_connection() as connection:
+        row = connection.execute(
+            """
+            SELECT id, chapter_code, chapter_name, term
+            FROM chapters
+            WHERE id IN (
+                SELECT ch.id
+                FROM chapters ch
+                JOIN classes c ON c.grade = ch.grade AND c.subject = ch.subject
+                WHERE c.id = ?
+            )
+            AND LOWER(chapter_name) = ?
+            ORDER BY chapter_name
+            LIMIT 1
+            """,
+            (class_id, normalized_name),
+        ).fetchone()
+        if row:
+            return dict(row)
+        row = connection.execute(
+            """
+            SELECT id, chapter_code, chapter_name, term
+            FROM chapters
+            WHERE id IN (
+                SELECT ch.id
+                FROM chapters ch
+                JOIN classes c ON c.grade = ch.grade AND c.subject = ch.subject
+                WHERE c.id = ?
+            )
+            AND LOWER(chapter_name) LIKE ?
+            ORDER BY chapter_name
+            LIMIT 1
+            """,
+            (class_id, f"%{normalized_name}%"),
+        ).fetchone()
+    return dict(row) if row else None
 
 
 def create_source_material(
@@ -2018,3 +2290,511 @@ def mark_queue_item_failed(queue_id: int, error_message: str) -> None:
             (error_message[:1000], queue_id),
         )
         connection.commit()
+
+
+def upsert_academic_year_plan(
+    *,
+    teacher_id: int,
+    class_id: int,
+    subject: str,
+    academic_year: str,
+    raw_syllabus_text: str,
+    plan_title: str,
+    planning: dict[str, Any],
+    generated_by_model: str,
+    status: str = "active",
+) -> int:
+    ensure_database()
+    with get_connection() as connection:
+        existing = connection.execute(
+            """
+            SELECT id
+            FROM academic_year_plans
+            WHERE class_id = ? AND LOWER(subject) = LOWER(?) AND academic_year = ? AND status != 'archived'
+            ORDER BY updated_at DESC
+            LIMIT 1
+            """,
+            (class_id, subject.strip(), academic_year.strip()),
+        ).fetchone()
+        if existing:
+            connection.execute(
+                """
+                UPDATE academic_year_plans
+                SET teacher_id = ?, plan_title = ?, raw_syllabus_text = ?, planning_json = ?,
+                    generated_by_model = ?, status = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (
+                    teacher_id,
+                    plan_title.strip(),
+                    raw_syllabus_text,
+                    json.dumps(planning, ensure_ascii=False),
+                    generated_by_model.strip(),
+                    status,
+                    int(existing["id"]),
+                ),
+            )
+            plan_id = int(existing["id"])
+        else:
+            plan_id = int(
+                connection.execute(
+                    """
+                    INSERT INTO academic_year_plans (
+                        teacher_id, class_id, subject, academic_year, plan_title,
+                        raw_syllabus_text, planning_json, generated_by_model, status
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        teacher_id,
+                        class_id,
+                        subject.strip(),
+                        academic_year.strip(),
+                        plan_title.strip(),
+                        raw_syllabus_text,
+                        json.dumps(planning, ensure_ascii=False),
+                        generated_by_model.strip(),
+                        status,
+                    ),
+                ).lastrowid
+            )
+        connection.commit()
+    return plan_id
+
+
+def replace_academic_year_plan_units(plan_id: int, units: list[dict[str, Any]]) -> None:
+    ensure_database()
+    with get_connection() as connection:
+        connection.execute("DELETE FROM academic_year_plan_units WHERE plan_id = ?", (plan_id,))
+        for index, unit in enumerate(units, start=1):
+            connection.execute(
+                """
+                INSERT INTO academic_year_plan_units (
+                    plan_id, chapter_code, chapter_name, subtopics_json, recommended_sessions,
+                    target_month, term, sequence_order, completed_subtopics_json,
+                    completion_percent, status
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    plan_id,
+                    str(unit.get("chapter_code") or "").strip(),
+                    str(unit.get("chapter_name") or f"Unit {index}").strip(),
+                    json.dumps(unit.get("subtopics", []), ensure_ascii=False),
+                    int(unit.get("recommended_sessions") or 1),
+                    str(unit.get("target_month") or "").strip(),
+                    str(unit.get("term") or "").strip(),
+                    int(unit.get("sequence_order") or index),
+                    json.dumps(unit.get("completed_subtopics", []), ensure_ascii=False),
+                    float(unit.get("completion_percent") or 0.0),
+                    str(unit.get("status") or "not_started").strip(),
+                ),
+            )
+        connection.commit()
+
+
+def get_active_academic_year_plan(
+    *,
+    class_id: int,
+    subject: str,
+    academic_year: str = "",
+) -> dict[str, Any] | None:
+    ensure_database()
+    with get_connection() as connection:
+        if academic_year.strip():
+            row = connection.execute(
+                """
+                SELECT *
+                FROM academic_year_plans
+                WHERE class_id = ? AND LOWER(subject) = LOWER(?) AND academic_year = ? AND status = 'active'
+                ORDER BY updated_at DESC
+                LIMIT 1
+                """,
+                (class_id, subject.strip(), academic_year.strip()),
+            ).fetchone()
+        else:
+            row = connection.execute(
+                """
+                SELECT *
+                FROM academic_year_plans
+                WHERE class_id = ? AND LOWER(subject) = LOWER(?) AND status = 'active'
+                ORDER BY updated_at DESC
+                LIMIT 1
+                """,
+                (class_id, subject.strip()),
+            ).fetchone()
+    if not row:
+        return None
+    item = dict(row)
+    item["planning"] = json.loads(item.get("planning_json") or "{}")
+    return item
+
+
+def list_academic_year_plan_units(plan_id: int) -> list[dict[str, Any]]:
+    ensure_database()
+    with get_connection() as connection:
+        rows = connection.execute(
+            """
+            SELECT *
+            FROM academic_year_plan_units
+            WHERE plan_id = ?
+            ORDER BY sequence_order, id
+            """,
+            (plan_id,),
+        ).fetchall()
+    items: list[dict[str, Any]] = []
+    for row in rows:
+        item = dict(row)
+        item["subtopics"] = json.loads(item.get("subtopics_json") or "[]")
+        item["completed_subtopics"] = json.loads(item.get("completed_subtopics_json") or "[]")
+        items.append(item)
+    return items
+
+
+def update_academic_year_plan_unit_progress(
+    *,
+    plan_unit_id: int,
+    completed_subtopics: list[str],
+    completion_percent: float,
+    status: str,
+) -> None:
+    ensure_database()
+    with get_connection() as connection:
+        connection.execute(
+            """
+            UPDATE academic_year_plan_units
+            SET completed_subtopics_json = ?, completion_percent = ?, status = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (
+                json.dumps(completed_subtopics, ensure_ascii=False),
+                float(max(0.0, min(100.0, completion_percent))),
+                status.strip(),
+                plan_unit_id,
+            ),
+        )
+        connection.commit()
+
+
+def upsert_class_timetable_slot(
+    *,
+    class_id: int,
+    subject: str,
+    weekday: int,
+    start_time: str,
+    end_time: str,
+    auto_record_enabled: bool = True,
+) -> int:
+    ensure_database()
+    with get_connection() as connection:
+        existing = connection.execute(
+            """
+            SELECT id
+            FROM class_timetable_slots
+            WHERE class_id = ? AND LOWER(subject) = LOWER(?) AND weekday = ? AND start_time = ? AND end_time = ?
+            LIMIT 1
+            """,
+            (class_id, subject.strip(), weekday, start_time.strip(), end_time.strip()),
+        ).fetchone()
+        if existing:
+            connection.execute(
+                """
+                UPDATE class_timetable_slots
+                SET auto_record_enabled = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (1 if auto_record_enabled else 0, int(existing["id"])),
+            )
+            slot_id = int(existing["id"])
+        else:
+            slot_id = int(
+                connection.execute(
+                    """
+                    INSERT INTO class_timetable_slots (
+                        class_id, subject, weekday, start_time, end_time, auto_record_enabled
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        class_id,
+                        subject.strip(),
+                        weekday,
+                        start_time.strip(),
+                        end_time.strip(),
+                        1 if auto_record_enabled else 0,
+                    ),
+                ).lastrowid
+            )
+        connection.commit()
+    return slot_id
+
+
+def list_class_timetable_slots(class_id: int, subject: str = "") -> list[dict[str, Any]]:
+    ensure_database()
+    with get_connection() as connection:
+        if subject.strip():
+            rows = connection.execute(
+                """
+                SELECT *
+                FROM class_timetable_slots
+                WHERE class_id = ? AND LOWER(subject) = LOWER(?)
+                ORDER BY weekday, start_time, end_time
+                """,
+                (class_id, subject.strip()),
+            ).fetchall()
+        else:
+            rows = connection.execute(
+                """
+                SELECT *
+                FROM class_timetable_slots
+                WHERE class_id = ?
+                ORDER BY subject, weekday, start_time, end_time
+                """,
+                (class_id,),
+            ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def delete_class_timetable_slot(slot_id: int) -> None:
+    ensure_database()
+    with get_connection() as connection:
+        connection.execute("DELETE FROM class_timetable_slots WHERE id = ?", (slot_id,))
+        connection.commit()
+
+
+def create_class_coverage_session(
+    *,
+    class_id: int,
+    teacher_id: int,
+    subject: str,
+    plan_id: int | None,
+    timetable_slot_id: int | None,
+    session_date: str,
+    scheduled_start: str = "",
+    scheduled_end: str = "",
+    actual_start: str = "",
+    actual_end: str = "",
+    source: str = "audio",
+    transcript_text: str = "",
+    coverage: dict[str, Any] | None = None,
+    confidence_score: float = 0.0,
+    coverage_summary: str = "",
+    processing_status: str = "completed",
+    processing_notes: str = "",
+) -> int:
+    ensure_database()
+    with get_connection() as connection:
+        session_id = int(
+            connection.execute(
+                """
+                INSERT INTO class_coverage_sessions (
+                    class_id, teacher_id, subject, plan_id, timetable_slot_id, session_date,
+                    scheduled_start, scheduled_end, actual_start, actual_end, source,
+                    transcript_text, coverage_json, confidence_score, coverage_summary,
+                    processing_status, processing_notes
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    class_id,
+                    teacher_id,
+                    subject.strip(),
+                    plan_id,
+                    timetable_slot_id,
+                    session_date.strip(),
+                    scheduled_start.strip(),
+                    scheduled_end.strip(),
+                    actual_start.strip(),
+                    actual_end.strip(),
+                    source.strip(),
+                    transcript_text,
+                    json.dumps(coverage or {}, ensure_ascii=False),
+                    float(max(0.0, min(1.0, confidence_score))),
+                    coverage_summary.strip(),
+                    processing_status.strip(),
+                    processing_notes.strip(),
+                ),
+            ).lastrowid
+        )
+        connection.commit()
+    return session_id
+
+
+def list_class_coverage_sessions(
+    *,
+    class_id: int,
+    subject: str = "",
+    limit: int = 20,
+) -> list[dict[str, Any]]:
+    ensure_database()
+    with get_connection() as connection:
+        if subject.strip():
+            rows = connection.execute(
+                """
+                SELECT *
+                FROM class_coverage_sessions
+                WHERE class_id = ? AND LOWER(subject) = LOWER(?)
+                ORDER BY session_date DESC, created_at DESC
+                LIMIT ?
+                """,
+                (class_id, subject.strip(), limit),
+            ).fetchall()
+        else:
+            rows = connection.execute(
+                """
+                SELECT *
+                FROM class_coverage_sessions
+                WHERE class_id = ?
+                ORDER BY session_date DESC, created_at DESC
+                LIMIT ?
+                """,
+                (class_id, limit),
+            ).fetchall()
+    items: list[dict[str, Any]] = []
+    for row in rows:
+        item = dict(row)
+        item["coverage"] = json.loads(item.get("coverage_json") or "{}")
+        items.append(item)
+    return items
+
+
+class TeacherClassRepository:
+    get_teacher = staticmethod(get_teacher)
+    create_class_for_teacher = staticmethod(create_class_for_teacher)
+    update_class_details = staticmethod(update_class_details)
+    list_teacher_classes = staticmethod(list_teacher_classes)
+    get_class_overview = staticmethod(get_class_overview)
+    list_class_subjects = staticmethod(list_class_subjects)
+    find_teacher_and_class_for_subject = staticmethod(find_teacher_and_class_for_subject)
+    find_class_for_attendance = staticmethod(find_class_for_attendance)
+    find_class_for_management = staticmethod(find_class_for_management)
+    add_subject_to_class = staticmethod(add_subject_to_class)
+    update_class_subject_details = staticmethod(update_class_subject_details)
+
+
+class CurriculumRepository:
+    list_grade_curriculum_subjects = staticmethod(list_grade_curriculum_subjects)
+    get_curriculum_subject = staticmethod(get_curriculum_subject)
+    ensure_curriculum_subject = staticmethod(ensure_curriculum_subject)
+    upsert_curriculum_chapters = staticmethod(upsert_curriculum_chapters)
+    list_curriculum_chapters = staticmethod(list_curriculum_chapters)
+    list_chapters_for_class = staticmethod(list_chapters_for_class)
+    find_chapter_for_class_topic = staticmethod(find_chapter_for_class_topic)
+    find_fallback_chapter_for_class = staticmethod(find_fallback_chapter_for_class)
+    find_chapter_for_management = staticmethod(find_chapter_for_management)
+    create_chapter_for_class = staticmethod(create_chapter_for_class)
+    update_chapter_details = staticmethod(update_chapter_details)
+    delete_chapter_if_unused = staticmethod(delete_chapter_if_unused)
+
+
+class StudentRepository:
+    list_class_students = staticmethod(list_class_students)
+    list_class_roster = staticmethod(list_class_roster)
+    list_inactive_class_students = staticmethod(list_inactive_class_students)
+    find_student_id = staticmethod(find_student_id)
+    add_student_to_class = staticmethod(add_student_to_class)
+    update_student_details = staticmethod(update_student_details)
+    deactivate_student = staticmethod(deactivate_student)
+    reactivate_student = staticmethod(reactivate_student)
+    get_student_detail = staticmethod(get_student_detail)
+    get_student_blueprint_context = staticmethod(get_student_blueprint_context)
+    get_student_adaptation_profile_context = staticmethod(get_student_adaptation_profile_context)
+    upsert_student_blueprint = staticmethod(upsert_student_blueprint)
+    upsert_student_adaptation_profile = staticmethod(upsert_student_adaptation_profile)
+    get_student_adaptation_profile = staticmethod(get_student_adaptation_profile)
+
+
+class AttendanceRepository:
+    upsert_class_attendance = staticmethod(upsert_class_attendance)
+    list_attendance_for_date = staticmethod(list_attendance_for_date)
+    get_attendance_overview = staticmethod(get_attendance_overview)
+    get_class_attendance_stats = staticmethod(get_class_attendance_stats)
+    update_student_attendance_status = staticmethod(update_student_attendance_status)
+    clear_student_attendance = staticmethod(clear_student_attendance)
+    clear_class_attendance = staticmethod(clear_class_attendance)
+
+
+class MaterialRepository:
+    create_source_material = staticmethod(create_source_material)
+    update_source_material = staticmethod(update_source_material)
+    create_ingestion_run = staticmethod(create_ingestion_run)
+    update_ingestion_run = staticmethod(update_ingestion_run)
+    replace_material_chunks = staticmethod(replace_material_chunks)
+    list_subject_materials = staticmethod(list_subject_materials)
+    list_material_chunks_for_subject = staticmethod(list_material_chunks_for_subject)
+    list_recent_ingestion_runs = staticmethod(list_recent_ingestion_runs)
+
+
+class AssessmentRepository:
+    list_class_assessments = staticmethod(list_class_assessments)
+    list_class_assessment_history = staticmethod(list_class_assessment_history)
+    create_assessment = staticmethod(create_assessment)
+    update_assessment_google_form_info = staticmethod(update_assessment_google_form_info)
+    list_assessment_questions = staticmethod(list_assessment_questions)
+    list_assessments_for_sync = staticmethod(list_assessments_for_sync)
+    get_assessment_sync_bundle = staticmethod(get_assessment_sync_bundle)
+    upsert_google_form_response_sync = staticmethod(upsert_google_form_response_sync)
+    list_attempted_students_for_assessment = staticmethod(list_attempted_students_for_assessment)
+    get_student_assessment_review = staticmethod(get_student_assessment_review)
+    list_google_linked_assessments = staticmethod(list_google_linked_assessments)
+
+
+class AnalyticsRepository:
+    list_class_concept_gaps = staticmethod(list_class_concept_gaps)
+    replace_mastery_snapshots = staticmethod(replace_mastery_snapshots)
+
+
+class QueueRepository:
+    enqueue_response_for_processing = staticmethod(enqueue_response_for_processing)
+    list_queue_items = staticmethod(list_queue_items)
+    claim_next_queued_response = staticmethod(claim_next_queued_response)
+    mark_queue_item_completed = staticmethod(mark_queue_item_completed)
+    mark_queue_item_failed = staticmethod(mark_queue_item_failed)
+
+
+class PlanningRepository:
+    upsert_academic_year_plan = staticmethod(upsert_academic_year_plan)
+    replace_academic_year_plan_units = staticmethod(replace_academic_year_plan_units)
+    get_active_academic_year_plan = staticmethod(get_active_academic_year_plan)
+    list_academic_year_plan_units = staticmethod(list_academic_year_plan_units)
+    update_academic_year_plan_unit_progress = staticmethod(update_academic_year_plan_unit_progress)
+
+
+class TimetableRepository:
+    upsert_class_timetable_slot = staticmethod(upsert_class_timetable_slot)
+    list_class_timetable_slots = staticmethod(list_class_timetable_slots)
+    delete_class_timetable_slot = staticmethod(delete_class_timetable_slot)
+
+
+class CoverageRepository:
+    create_class_coverage_session = staticmethod(create_class_coverage_session)
+    list_class_coverage_sessions = staticmethod(list_class_coverage_sessions)
+
+
+class RepositoryContainer:
+    def __init__(self) -> None:
+        self.teacher_classes = TeacherClassRepository()
+        self.curriculum = CurriculumRepository()
+        self.students = StudentRepository()
+        self.attendance = AttendanceRepository()
+        self.materials = MaterialRepository()
+        self.assessments = AssessmentRepository()
+        self.analytics = AnalyticsRepository()
+        self.queue = QueueRepository()
+        self.planning = PlanningRepository()
+        self.timetable = TimetableRepository()
+        self.coverage = CoverageRepository()
+
+
+teacher_class_repository = TeacherClassRepository()
+curriculum_repository = CurriculumRepository()
+student_repository = StudentRepository()
+attendance_repository = AttendanceRepository()
+material_repository = MaterialRepository()
+assessment_repository = AssessmentRepository()
+analytics_repository = AnalyticsRepository()
+queue_repository = QueueRepository()
+planning_repository = PlanningRepository()
+timetable_repository = TimetableRepository()
+coverage_repository = CoverageRepository()
+repositories = RepositoryContainer()

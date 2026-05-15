@@ -1,15 +1,17 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import json
 from typing import Any
 
 import requests
 
+from app.model_control import load_model_sampling_config
+
 
 @dataclass
 class LlamaServerConfig:
-    base_url: str = "http://127.0.0.1:8080"
+    base_url: str = field(default_factory=lambda: load_model_sampling_config().llama_base_url)
     default_slot_id: int | None = None
     timeout_seconds: int = 120
 
