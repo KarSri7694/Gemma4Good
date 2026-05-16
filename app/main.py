@@ -25,6 +25,14 @@ from datetime import datetime, timedelta
 import streamlit as st
 from requests import RequestException
 
+st.set_page_config(
+    page_title="Pathshala Play",
+    page_icon="PP",
+    layout="wide",
+    initial_sidebar_state="expanded",
+    menu_items={"About": "Pathshala Play - an AI-powered classroom copilot for teachers."},
+)
+
 ROOT = Path(__file__).resolve().parent.parent
 CONVERSATION_LOG_PATH = ROOT / "conversation.txt"
 if str(ROOT) not in sys.path:
@@ -64,13 +72,6 @@ from app.repository import (
 )
 
 
-st.set_page_config(
-    page_title="Pathshala Play",
-    page_icon="🎓",
-    layout="wide",
-    initial_sidebar_state="expanded",
-    menu_items={"About": "Pathshala Play — an AI-powered classroom copilot for Indian teachers."},
-)
 apply_global_ui_theme()
 
 ensure_database()
