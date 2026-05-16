@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import json
 from typing import Any
+from urllib.parse import urljoin
 
 import requests
 
@@ -11,21 +12,29 @@ from app.model_control import load_model_sampling_config
 
 @dataclass
 class LlamaServerConfig:
+    provider: str = field(default_factory=lambda: load_model_sampling_config().provider)
     base_url: str = field(default_factory=lambda: load_model_sampling_config().llama_base_url)
+    api_key: str = field(default_factory=lambda: load_model_sampling_config().openrouter_api_key)
     default_slot_id: int | None = None
     timeout_seconds: int = 120
 
 
 class LlamaServerClient:
-    """Thin requests-based client for llama.cpp's llama-server."""
+    """Thin requests-based client for local llama.cpp or OpenRouter-hosted OpenAI-compatible APIs."""
 
     def __init__(self, config: LlamaServerConfig | None = None) -> None:
         self.config = config or LlamaServerConfig()
+        self.provider = (self.config.provider or "LOCAL").strip().upper()
+        self.base_url = (self.config.base_url or "").rstrip("/")
 
     def health(self) -> dict[str, Any]:
+        if self.provider != "LOCAL":
+            return {"status": "unsupported", "provider": self.provider, "base_url": self.base_url}
         return self._get("/health")
 
     def props(self) -> dict[str, Any]:
+        if self.provider != "LOCAL":
+            return {"provider": self.provider, "base_url": self.base_url}
         return self._get("/props")
 
     def completion(
@@ -38,6 +47,7 @@ class LlamaServerClient:
         stop: list[str] | None = None,
         extra_payload: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        self._require_local_feature("completion")
         payload: dict[str, Any] = {"prompt": prompt}
         if temperature is not None:
             payload["temperature"] = temperature
@@ -111,6 +121,7 @@ class LlamaServerClient:
         return self._post("/v1/embeddings", payload)
 
     def tokenize(self, content: str, add_special: bool = False, parse_special: bool = False) -> dict[str, Any]:
+        self._require_local_feature("tokenize")
         payload = {
             "content": content,
             "add_special": add_special,
@@ -119,11 +130,13 @@ class LlamaServerClient:
         return self._post("/tokenize", payload)
 
     def detokenize(self, tokens: list[int]) -> dict[str, Any]:
+        self._require_local_feature("detokenize")
         return self._post("/detokenize", {"tokens": tokens})
 
     def _get(self, path: str) -> dict[str, Any]:
         response = requests.get(
-            f"{self.config.base_url}{path}",
+            self._build_url(path),
+            headers=self._headers(),
             timeout=self.config.timeout_seconds,
         )
         response.raise_for_status()
@@ -131,8 +144,9 @@ class LlamaServerClient:
 
     def _post(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
         response = requests.post(
-            f"{self.config.base_url}{path}",
+            self._build_url(path),
             json=payload,
+            headers=self._headers(),
             timeout=self.config.timeout_seconds,
         )
         if not response.ok:
@@ -149,8 +163,9 @@ class LlamaServerClient:
 
     def _post_stream(self, path: str, payload: dict[str, Any]):
         with requests.post(
-            f"{self.config.base_url}{path}",
+            self._build_url(path),
             json=payload,
+            headers=self._headers(),
             timeout=self.config.timeout_seconds,
             stream=True,
         ) as response:
@@ -183,3 +198,21 @@ class LlamaServerClient:
                 content = delta.get("content")
                 if content:
                     yield {"type": "content", "text": str(content)}
+
+    def _headers(self) -> dict[str, str]:
+        headers = {"Content-Type": "application/json"}
+        if self.provider == "OPENROUTER":
+            if not self.config.api_key:
+                raise RuntimeError("OPENROUTER_API_KEY is required when PROVIDER=OPENROUTER.")
+            headers["Authorization"] = f"Bearer {self.config.api_key}"
+        return headers
+
+    def _build_url(self, path: str) -> str:
+        normalized_path = path if path.startswith("/") else f"/{path}"
+        if self.base_url.endswith("/v1") and normalized_path.startswith("/v1/"):
+            normalized_path = normalized_path[len("/v1") :]
+        return urljoin(f"{self.base_url}/", normalized_path.lstrip("/"))
+
+    def _require_local_feature(self, feature_name: str) -> None:
+        if self.provider != "LOCAL":
+            raise RuntimeError(f"{feature_name} is only supported when PROVIDER=LOCAL.")
