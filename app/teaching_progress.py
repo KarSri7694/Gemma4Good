@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import base64
 from io import BytesIO
-from dataclasses import dataclass
 from datetime import datetime
 import io
 import importlib.util
@@ -15,6 +14,7 @@ from typing import Any
 from requests import RequestException
 
 from app.llama_client import LlamaServerClient, LlamaServerConfig
+from app.model_control import load_model_sampling_config
 from app.repository import (
     coverage_repository,
     curriculum_repository,
@@ -136,7 +136,6 @@ class SoundDeviceRecorder:
 SOUNDDEVICE_RECORDER = SoundDeviceRecorder()
 
 
-@dataclass
 class TeachingPlannerService:
     def _extract_text(self, response: dict[str, Any]) -> str:
         choices = response.get("choices")
