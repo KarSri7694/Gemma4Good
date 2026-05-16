@@ -1,0 +1,1093 @@
+{
+  "1:science": {
+    "context": {
+      "date": "2026-05-15",
+      "class": {
+        "grade": "7",
+        "section": "A",
+        "subject": "Science",
+        "student_count": 12,
+        "assessment_count": 7,
+        "avg_percentage": 71.2
+      },
+      "attendance": {
+        "present_count": 0,
+        "absent_count": 0,
+        "absent_students": []
+      },
+      "coverage": {
+        "id": 131,
+        "class_id": 1,
+        "teacher_id": 1,
+        "subject": "Science",
+        "plan_id": 105,
+        "timetable_slot_id": 738,
+        "session_date": "2026-05-14",
+        "scheduled_start": "09:35",
+        "scheduled_end": "10:15",
+        "actual_start": "09:35",
+        "actual_end": "10:15",
+        "source": "audio_plus_note",
+        "transcript_text": "Teacher revised Heat, explained clinical thermometer, temperature reading, and flagged sea breeze and land breeze for reteach.",
+        "coverage_json": "{\"chapter_name\": \"Heat\", \"subtopics_covered\": [\"clinical thermometer\", \"temperature reading\"], \"reteach_topics\": [\"sea breeze and land breeze\"], \"next_topics\": [\"conduction convection radiation\"], \"coverage_percent\": 66.7}",
+        "confidence_score": 0.71,
+        "coverage_summary": "Science: covered clinical thermometer, temperature reading. Next up: conduction convection radiation.",
+        "processing_status": "completed",
+        "processing_notes": "Seeded from combined audio and teacher note flow.",
+        "created_at": "2026-05-15 16:41:47",
+        "updated_at": "2026-05-15 16:41:47",
+        "coverage": {
+          "chapter_name": "Heat",
+          "subtopics_covered": [
+            "clinical thermometer",
+            "temperature reading"
+          ],
+          "reteach_topics": [
+            "sea breeze and land breeze"
+          ],
+          "next_topics": [
+            "conduction convection radiation"
+          ],
+          "coverage_percent": 66.7
+        }
+      },
+      "plan": {
+        "completion_percent": 39.5,
+        "upcoming_units": [
+          {
+            "id": 426,
+            "plan_id": 105,
+            "chapter_code": "SCI-7-02",
+            "chapter_name": "Heat",
+            "subtopics_json": "[\"clinical thermometer\", \"conduction convection radiation\", \"sea breeze and land breeze\"]",
+            "recommended_sessions": 5,
+            "target_month": "May",
+            "term": "Term 1",
+            "sequence_order": 2,
+            "completed_subtopics_json": "[\"clinical thermometer\", \"conduction convection radiation\"]",
+            "completion_percent": 58.0,
+            "status": "in_progress",
+            "created_at": "2026-05-15 16:41:47",
+            "updated_at": "2026-05-15 16:41:47",
+            "subtopics": [
+              "clinical thermometer",
+              "conduction convection radiation",
+              "sea breeze and land breeze"
+            ],
+            "completed_subtopics": [
+              "clinical thermometer",
+              "conduction convection radiation"
+            ]
+          },
+          {
+            "id": 427,
+            "plan_id": 105,
+            "chapter_code": "SCI-7-03",
+            "chapter_name": "Acids Bases and Salts",
+            "subtopics_json": "[\"indicators\", \"neutralisation\", \"daily life examples\"]",
+            "recommended_sessions": 5,
+            "target_month": "July",
+            "term": "Term 2",
+            "sequence_order": 3,
+            "completed_subtopics_json": "[]",
+            "completion_percent": 0.0,
+            "status": "not_started",
+            "created_at": "2026-05-15 16:41:47",
+            "updated_at": "2026-05-15 16:41:47",
+            "subtopics": [
+              "indicators",
+              "neutralisation",
+              "daily life examples"
+            ],
+            "completed_subtopics": []
+          },
+          {
+            "id": 428,
+            "plan_id": 105,
+            "chapter_code": "SCI-7-04",
+            "chapter_name": "Motion and Time",
+            "subtopics_json": "[\"speed and distance\", \"uniform motion\", \"graphs\"]",
+            "recommended_sessions": 5,
+            "target_month": "August",
+            "term": "Term 2",
+            "sequence_order": 4,
+            "completed_subtopics_json": "[]",
+            "completion_percent": 0.0,
+            "status": "not_started",
+            "created_at": "2026-05-15 16:41:47",
+            "updated_at": "2026-05-15 16:41:47",
+            "subtopics": [
+              "speed and distance",
+              "uniform motion",
+              "graphs"
+            ],
+            "completed_subtopics": []
+          }
+        ]
+      },
+      "concept_gaps": [
+        {
+          "concept_id": 1218,
+          "concept_name": "Nutrient Sources",
+          "description": "Nutrient Sources in Nutrition in Plants",
+          "mastery_percent": 58.3,
+          "students_assessed": 12,
+          "students_lagging": 4,
+          "last_updated_at": "2026-05-12 12:00:00"
+        },
+        {
+          "concept_id": 1221,
+          "concept_name": "Sea Breeze And Land Breeze",
+          "description": "Sea Breeze And Land Breeze in Heat",
+          "mastery_percent": 58.3,
+          "students_assessed": 12,
+          "students_lagging": 4,
+          "last_updated_at": "2026-05-12 12:00:00"
+        },
+        {
+          "concept_id": 1224,
+          "concept_name": "Daily Life Examples",
+          "description": "Daily Life Examples in Acids Bases and Salts",
+          "mastery_percent": 58.3,
+          "students_assessed": 12,
+          "students_lagging": 4,
+          "last_updated_at": "2026-05-12 12:00:00"
+        },
+        {
+          "concept_id": 1227,
+          "concept_name": "Graphs",
+          "description": "Graphs in Motion and Time",
+          "mastery_percent": 58.3,
+          "students_assessed": 12,
+          "students_lagging": 4,
+          "last_updated_at": "2026-05-12 12:00:00"
+        },
+        {
+          "concept_id": 1230,
+          "concept_name": "Properties Of Addition",
+          "description": "Properties Of Addition in Integers",
+          "mastery_percent": 60.5,
+          "students_assessed": 12,
+          "students_lagging": 4,
+          "last_updated_at": "2026-05-12 12:00:00"
+        }
+      ],
+      "recent_assessments": [
+        {
+          "id": 154,
+          "title": "Math Quiz 2 - Fractions and Decimals",
+          "assessment_type": "class_test",
+          "delivery_mode": "google_form",
+          "language": "English + Hindi",
+          "total_marks": 18.0,
+          "google_form_url": "https://docs.google.com/forms/d/demo-form-004/edit",
+          "created_at": "2026-05-10 08:00:00",
+          "chapter_name": "Fractions and Decimals",
+          "avg_percentage": 62.6,
+          "submissions": 12
+        },
+        {
+          "id": 152,
+          "title": "Science Quiz 2 - Heat",
+          "assessment_type": "class_test",
+          "delivery_mode": "google_form",
+          "language": "English + Hindi",
+          "total_marks": 18.0,
+          "google_form_url": "https://docs.google.com/forms/d/demo-form-002/edit",
+          "created_at": "2026-05-08 08:00:00",
+          "chapter_name": "Heat",
+          "avg_percentage": 59.3,
+          "submissions": 12
+        },
+        {
+          "id": 156,
+          "title": "Computer Science Quiz - Number System",
+          "assessment_type": "practice",
+          "delivery_mode": "local",
+          "language": "English",
+          "total_marks": 18.0,
+          "google_form_url": null,
+          "created_at": "2026-05-05 08:00:00",
+          "chapter_name": "Number System",
+          "avg_percentage": 83.7,
+          "submissions": 12
+        }
+      ],
+      "support_students": [
+        {
+          "full_name": "Meera Khan",
+          "avg_percentage": 54.8,
+          "lagging_concepts": 308,
+          "attendance_percentage": 80.0
+        },
+        {
+          "full_name": "Kabir Ali",
+          "avg_percentage": 61.7,
+          "lagging_concepts": 168,
+          "attendance_percentage": 80.0
+        },
+        {
+          "full_name": "Arjun Mehta",
+          "avg_percentage": 62.4,
+          "lagging_concepts": 168,
+          "attendance_percentage": 90.0
+        },
+        {
+          "full_name": "Rahul Sethi",
+          "avg_percentage": 62.1,
+          "lagging_concepts": 112,
+          "attendance_percentage": 90.0
+        },
+        {
+          "full_name": "Ishaan Rao",
+          "avg_percentage": 67.6,
+          "lagging_concepts": 28,
+          "attendance_percentage": 100.0
+        }
+      ]
+    },
+    "brief": {
+      "daily_summary": "The session covered clinical thermometer and temperature reading within the 'Heat' chapter, achieving 66.7% coverage. The class average for the recent Heat quiz was 59.3%, indicating a need for reinforcement. The primary focus for tomorrow should be addressing the flagged reteach topic, 'sea breeze and land breeze', before moving to the next concept.",
+      "next_concept_to_teach": "Conduction, Convection, and Radiation",
+      "reteach_concepts": [
+        "Sea breeze and land breeze"
+      ],
+      "speed_up_areas": [
+        "N/A - Focus on reinforcing Heat concepts due to low quiz scores before accelerating to Acids Bases and Salts."
+      ],
+      "students_to_watch": [
+        "Meera Khan (Lowest average: 54.8%)",
+        "Kabir Ali (Low average: 61.7%)"
+      ],
+      "teacher_actions": [
+        "Dedicate time to reteach 'sea breeze and land breeze' as flagged.",
+        "Review the Science Quiz 2 (Heat) results to identify specific student misconceptions.",
+        "Provide targeted support sessions for Meera Khan and Kabir Ali."
+      ]
+    },
+    "generated_by_model": "Gemma-4-E4B-Q4_K_M",
+    "cache_metadata": {
+      "class_id": 1,
+      "subject_name": "Science",
+      "saved_at": "2026-05-15"
+    }
+  },
+  "1:english": {
+    "context": {
+      "date": "2026-05-15",
+      "class": {
+        "grade": "7",
+        "section": "A",
+        "subject": "English",
+        "student_count": 12,
+        "assessment_count": 7,
+        "avg_percentage": 71.2
+      },
+      "attendance": {
+        "present_count": 0,
+        "absent_count": 0,
+        "absent_students": []
+      },
+      "coverage": {
+        "id": 183,
+        "class_id": 1,
+        "teacher_id": 1,
+        "subject": "English",
+        "plan_id": 154,
+        "timetable_slot_id": 1058,
+        "session_date": "2026-05-12",
+        "scheduled_start": "08:00",
+        "scheduled_end": "08:40",
+        "actual_start": "08:00",
+        "actual_end": "08:40",
+        "source": "audio_plus_note",
+        "transcript_text": "Teacher revised A Gift of Chappals, explained dialogue reading, chapter summary.",
+        "coverage_json": "{\"chapter_name\": \"A Gift of Chappals\", \"subtopics_covered\": [\"dialogue reading\", \"chapter summary\"], \"reteach_topics\": [], \"next_topics\": [\"humour and empathy\"], \"coverage_percent\": 66.7}",
+        "confidence_score": 0.84,
+        "coverage_summary": "English: covered dialogue reading, chapter summary. Next up: humour and empathy.",
+        "processing_status": "completed",
+        "processing_notes": "Seeded from combined audio and teacher note flow.",
+        "created_at": "2026-05-15 16:47:34",
+        "updated_at": "2026-05-15 16:47:34",
+        "coverage": {
+          "chapter_name": "A Gift of Chappals",
+          "subtopics_covered": [
+            "dialogue reading",
+            "chapter summary"
+          ],
+          "reteach_topics": [],
+          "next_topics": [
+            "humour and empathy"
+          ],
+          "coverage_percent": 66.7
+        }
+      },
+      "plan": {
+        "completion_percent": 36.2,
+        "upcoming_units": [
+          {
+            "id": 622,
+            "plan_id": 154,
+            "chapter_code": "ENG-7-02",
+            "chapter_name": "A Gift of Chappals",
+            "subtopics_json": "[\"dialogue reading\", \"humour and empathy\", \"chapter summary\"]",
+            "recommended_sessions": 5,
+            "target_month": "May",
+            "term": "Term 1",
+            "sequence_order": 2,
+            "completed_subtopics_json": "[\"dialogue reading\"]",
+            "completion_percent": 45.0,
+            "status": "in_progress",
+            "created_at": "2026-05-15 16:47:34",
+            "updated_at": "2026-05-15 16:47:34",
+            "subtopics": [
+              "dialogue reading",
+              "humour and empathy",
+              "chapter summary"
+            ],
+            "completed_subtopics": [
+              "dialogue reading"
+            ]
+          },
+          {
+            "id": 623,
+            "plan_id": 154,
+            "chapter_code": "ENG-7-03",
+            "chapter_name": "Gopal and the Hilsa-Fish",
+            "subtopics_json": "[\"comic setting\", \"plot inference\", \"retelling\"]",
+            "recommended_sessions": 4,
+            "target_month": "July",
+            "term": "Term 2",
+            "sequence_order": 3,
+            "completed_subtopics_json": "[]",
+            "completion_percent": 0.0,
+            "status": "not_started",
+            "created_at": "2026-05-15 16:47:34",
+            "updated_at": "2026-05-15 16:47:34",
+            "subtopics": [
+              "comic setting",
+              "plot inference",
+              "retelling"
+            ],
+            "completed_subtopics": []
+          },
+          {
+            "id": 624,
+            "plan_id": 154,
+            "chapter_code": "ENG-7-04",
+            "chapter_name": "The Ashes That Made Trees Bloom",
+            "subtopics_json": "[\"setting and mood\", \"kindness and greed\", \"text evidence\"]",
+            "recommended_sessions": 5,
+            "target_month": "August",
+            "term": "Term 2",
+            "sequence_order": 4,
+            "completed_subtopics_json": "[]",
+            "completion_percent": 0.0,
+            "status": "not_started",
+            "created_at": "2026-05-15 16:47:34",
+            "updated_at": "2026-05-15 16:47:34",
+            "subtopics": [
+              "setting and mood",
+              "kindness and greed",
+              "text evidence"
+            ],
+            "completed_subtopics": []
+          }
+        ]
+      },
+      "concept_gaps": [
+        {
+          "concept_id": 1818,
+          "concept_name": "Nutrient Sources",
+          "description": "Nutrient Sources in Nutrition in Plants",
+          "mastery_percent": 58.3,
+          "students_assessed": 12,
+          "students_lagging": 4,
+          "last_updated_at": "2026-05-12 12:00:00"
+        },
+        {
+          "concept_id": 1821,
+          "concept_name": "Sea Breeze And Land Breeze",
+          "description": "Sea Breeze And Land Breeze in Heat",
+          "mastery_percent": 58.3,
+          "students_assessed": 12,
+          "students_lagging": 4,
+          "last_updated_at": "2026-05-12 12:00:00"
+        },
+        {
+          "concept_id": 1824,
+          "concept_name": "Daily Life Examples",
+          "description": "Daily Life Examples in Acids Bases and Salts",
+          "mastery_percent": 58.3,
+          "students_assessed": 12,
+          "students_lagging": 4,
+          "last_updated_at": "2026-05-12 12:00:00"
+        },
+        {
+          "concept_id": 1827,
+          "concept_name": "Graphs",
+          "description": "Graphs in Motion and Time",
+          "mastery_percent": 58.3,
+          "students_assessed": 12,
+          "students_lagging": 4,
+          "last_updated_at": "2026-05-12 12:00:00"
+        },
+        {
+          "concept_id": 1830,
+          "concept_name": "Properties Of Addition",
+          "description": "Properties Of Addition in Integers",
+          "mastery_percent": 60.5,
+          "students_assessed": 12,
+          "students_lagging": 4,
+          "last_updated_at": "2026-05-12 12:00:00"
+        }
+      ],
+      "recent_assessments": [
+        {
+          "id": 224,
+          "title": "Math Quiz 2 - Fractions and Decimals",
+          "assessment_type": "class_test",
+          "delivery_mode": "google_form",
+          "language": "English + Hindi",
+          "total_marks": 18.0,
+          "google_form_url": "https://docs.google.com/forms/d/demo-form-004/edit",
+          "created_at": "2026-05-10 08:00:00",
+          "chapter_name": "Fractions and Decimals",
+          "avg_percentage": 62.6,
+          "submissions": 12
+        },
+        {
+          "id": 222,
+          "title": "Science Quiz 2 - Heat",
+          "assessment_type": "class_test",
+          "delivery_mode": "google_form",
+          "language": "English + Hindi",
+          "total_marks": 18.0,
+          "google_form_url": "https://docs.google.com/forms/d/demo-form-002/edit",
+          "created_at": "2026-05-08 08:00:00",
+          "chapter_name": "Heat",
+          "avg_percentage": 59.3,
+          "submissions": 12
+        },
+        {
+          "id": 226,
+          "title": "Computer Science Quiz - Number System",
+          "assessment_type": "practice",
+          "delivery_mode": "local",
+          "language": "English",
+          "total_marks": 18.0,
+          "google_form_url": null,
+          "created_at": "2026-05-05 08:00:00",
+          "chapter_name": "Number System",
+          "avg_percentage": 83.7,
+          "submissions": 12
+        }
+      ],
+      "support_students": [
+        {
+          "full_name": "Meera Khan",
+          "avg_percentage": 54.8,
+          "lagging_concepts": 308,
+          "attendance_percentage": 80.0
+        },
+        {
+          "full_name": "Kabir Ali",
+          "avg_percentage": 61.7,
+          "lagging_concepts": 168,
+          "attendance_percentage": 80.0
+        },
+        {
+          "full_name": "Arjun Mehta",
+          "avg_percentage": 62.4,
+          "lagging_concepts": 168,
+          "attendance_percentage": 90.0
+        },
+        {
+          "full_name": "Rahul Sethi",
+          "avg_percentage": 62.1,
+          "lagging_concepts": 112,
+          "attendance_percentage": 90.0
+        },
+        {
+          "full_name": "Ishaan Rao",
+          "avg_percentage": 67.6,
+          "lagging_concepts": 28,
+          "attendance_percentage": 100.0
+        }
+      ]
+    },
+    "brief": {
+      "daily_summary": "English coverage for 'A Gift of Chappals' was successful, covering dialogue reading and chapter summary. The class average stands at 71.2%. Overall plan completion is at 36.2%.",
+      "next_concept_to_teach": "Humour and Empathy (A Gift of Chappals)",
+      "reteach_concepts": [
+        "Nutrient Sources (Low mastery in Science)",
+        "Sea Breeze And Land Breeze (Low mastery in Science)"
+      ],
+      "speed_up_areas": [
+        "Maintain momentum on 'A Gift of Chappals' to ensure timely completion of the current unit."
+      ],
+      "students_to_watch": [
+        "Meera Khan (Lowest average score)",
+        "Kabir Ali (Needs focused support)"
+      ],
+      "teacher_actions": [
+        "Conduct targeted intervention sessions for Meera Khan and Kabir Ali.",
+        "Schedule a brief review session on low-mastery concepts (e.g., Nutrient Sources) to address cross-curricular gaps.",
+        "Continue the English lesson focusing on 'Humour and Empathy'."
+      ]
+    },
+    "generated_by_model": "Gemma-4-E4B-Q4_K_M",
+    "cache_metadata": {
+      "class_id": 1,
+      "subject_name": "English",
+      "saved_at": "2026-05-15"
+    }
+  },
+  "1:computer science": {
+    "context": {
+      "date": "2026-05-15",
+      "class": {
+        "grade": "7",
+        "section": "A",
+        "subject": "Computer Science",
+        "student_count": 12,
+        "assessment_count": 7,
+        "avg_percentage": 71.2
+      },
+      "attendance": {
+        "present_count": 0,
+        "absent_count": 0,
+        "absent_students": []
+      },
+      "coverage": {
+        "id": 114,
+        "class_id": 1,
+        "teacher_id": 1,
+        "subject": "Computer Science",
+        "plan_id": 87,
+        "timetable_slot_id": 591,
+        "session_date": "2026-05-12",
+        "scheduled_start": "10:35",
+        "scheduled_end": "11:15",
+        "actual_start": "10:35",
+        "actual_end": "11:15",
+        "source": "audio_plus_note",
+        "transcript_text": "Teacher revised Number System, explained binary numbers.",
+        "coverage_json": "{\"chapter_name\": \"Number System\", \"subtopics_covered\": [\"binary numbers\"], \"reteach_topics\": [], \"next_topics\": [\"decimal to binary\"], \"coverage_percent\": 50.0}",
+        "confidence_score": 0.88,
+        "coverage_summary": "Computer Science: covered binary numbers. Next up: decimal to binary.",
+        "processing_status": "completed",
+        "processing_notes": "Seeded from combined audio and teacher note flow.",
+        "created_at": "2026-05-15 16:41:29",
+        "updated_at": "2026-05-15 16:41:29",
+        "coverage": {
+          "chapter_name": "Number System",
+          "subtopics_covered": [
+            "binary numbers"
+          ],
+          "reteach_topics": [],
+          "next_topics": [
+            "decimal to binary"
+          ],
+          "coverage_percent": 50.0
+        }
+      },
+      "plan": {
+        "completion_percent": 34.5,
+        "upcoming_units": [
+          {
+            "id": 354,
+            "plan_id": 87,
+            "chapter_code": "CSC-7-02",
+            "chapter_name": "Number System",
+            "subtopics_json": "[\"binary numbers\", \"decimal to binary\", \"bits and bytes\"]",
+            "recommended_sessions": 4,
+            "target_month": "May",
+            "term": "Term 1",
+            "sequence_order": 2,
+            "completed_subtopics_json": "[\"binary numbers\"]",
+            "completion_percent": 38.0,
+            "status": "in_progress",
+            "created_at": "2026-05-15 16:41:29",
+            "updated_at": "2026-05-15 16:41:29",
+            "subtopics": [
+              "binary numbers",
+              "decimal to binary",
+              "bits and bytes"
+            ],
+            "completed_subtopics": [
+              "binary numbers"
+            ]
+          },
+          {
+            "id": 355,
+            "plan_id": 87,
+            "chapter_code": "CSC-7-03",
+            "chapter_name": "Internet Services",
+            "subtopics_json": "[\"web browser use\", \"email etiquette\", \"safe search\"]",
+            "recommended_sessions": 4,
+            "target_month": "July",
+            "term": "Term 2",
+            "sequence_order": 3,
+            "completed_subtopics_json": "[]",
+            "completion_percent": 0.0,
+            "status": "not_started",
+            "created_at": "2026-05-15 16:41:29",
+            "updated_at": "2026-05-15 16:41:29",
+            "subtopics": [
+              "web browser use",
+              "email etiquette",
+              "safe search"
+            ],
+            "completed_subtopics": []
+          },
+          {
+            "id": 356,
+            "plan_id": 87,
+            "chapter_code": "CSC-7-04",
+            "chapter_name": "Scratch Programming",
+            "subtopics_json": "[\"sprites and stage\", \"motion blocks\", \"simple animation\"]",
+            "recommended_sessions": 6,
+            "target_month": "August",
+            "term": "Term 2",
+            "sequence_order": 4,
+            "completed_subtopics_json": "[]",
+            "completion_percent": 0.0,
+            "status": "not_started",
+            "created_at": "2026-05-15 16:41:29",
+            "updated_at": "2026-05-15 16:41:29",
+            "subtopics": [
+              "sprites and stage",
+              "motion blocks",
+              "simple animation"
+            ],
+            "completed_subtopics": []
+          }
+        ]
+      },
+      "concept_gaps": [
+        {
+          "concept_id": 978,
+          "concept_name": "Nutrient Sources",
+          "description": "Nutrient Sources in Nutrition in Plants",
+          "mastery_percent": 58.3,
+          "students_assessed": 12,
+          "students_lagging": 4,
+          "last_updated_at": "2026-05-12 12:00:00"
+        },
+        {
+          "concept_id": 981,
+          "concept_name": "Sea Breeze And Land Breeze",
+          "description": "Sea Breeze And Land Breeze in Heat",
+          "mastery_percent": 58.3,
+          "students_assessed": 12,
+          "students_lagging": 4,
+          "last_updated_at": "2026-05-12 12:00:00"
+        },
+        {
+          "concept_id": 984,
+          "concept_name": "Daily Life Examples",
+          "description": "Daily Life Examples in Acids Bases and Salts",
+          "mastery_percent": 58.3,
+          "students_assessed": 12,
+          "students_lagging": 4,
+          "last_updated_at": "2026-05-12 12:00:00"
+        },
+        {
+          "concept_id": 987,
+          "concept_name": "Graphs",
+          "description": "Graphs in Motion and Time",
+          "mastery_percent": 58.3,
+          "students_assessed": 12,
+          "students_lagging": 4,
+          "last_updated_at": "2026-05-12 12:00:00"
+        },
+        {
+          "concept_id": 990,
+          "concept_name": "Properties Of Addition",
+          "description": "Properties Of Addition in Integers",
+          "mastery_percent": 60.5,
+          "students_assessed": 12,
+          "students_lagging": 4,
+          "last_updated_at": "2026-05-12 12:00:00"
+        }
+      ],
+      "recent_assessments": [
+        {
+          "id": 126,
+          "title": "Math Quiz 2 - Fractions and Decimals",
+          "assessment_type": "class_test",
+          "delivery_mode": "google_form",
+          "language": "English + Hindi",
+          "total_marks": 18.0,
+          "google_form_url": "https://docs.google.com/forms/d/demo-form-004/edit",
+          "created_at": "2026-05-10 08:00:00",
+          "chapter_name": "Fractions and Decimals",
+          "avg_percentage": 62.6,
+          "submissions": 12
+        },
+        {
+          "id": 124,
+          "title": "Science Quiz 2 - Heat",
+          "assessment_type": "class_test",
+          "delivery_mode": "google_form",
+          "language": "English + Hindi",
+          "total_marks": 18.0,
+          "google_form_url": "https://docs.google.com/forms/d/demo-form-002/edit",
+          "created_at": "2026-05-08 08:00:00",
+          "chapter_name": "Heat",
+          "avg_percentage": 59.3,
+          "submissions": 12
+        },
+        {
+          "id": 128,
+          "title": "Computer Science Quiz - Number System",
+          "assessment_type": "practice",
+          "delivery_mode": "local",
+          "language": "English",
+          "total_marks": 18.0,
+          "google_form_url": null,
+          "created_at": "2026-05-05 08:00:00",
+          "chapter_name": "Number System",
+          "avg_percentage": 83.7,
+          "submissions": 12
+        }
+      ],
+      "support_students": [
+        {
+          "full_name": "Meera Khan",
+          "avg_percentage": 54.8,
+          "lagging_concepts": 308,
+          "attendance_percentage": 80.0
+        },
+        {
+          "full_name": "Kabir Ali",
+          "avg_percentage": 61.7,
+          "lagging_concepts": 168,
+          "attendance_percentage": 80.0
+        },
+        {
+          "full_name": "Arjun Mehta",
+          "avg_percentage": 62.4,
+          "lagging_concepts": 168,
+          "attendance_percentage": 90.0
+        },
+        {
+          "full_name": "Rahul Sethi",
+          "avg_percentage": 62.1,
+          "lagging_concepts": 112,
+          "attendance_percentage": 90.0
+        },
+        {
+          "full_name": "Ishaan Rao",
+          "avg_percentage": 67.6,
+          "lagging_concepts": 28,
+          "attendance_percentage": 100.0
+        }
+      ]
+    },
+    "brief": {
+      "daily_summary": "Attendance today: 0 present, 0 absent. Plan completion for Computer Science: 34.5%.",
+      "next_concept_to_teach": "binary numbers, decimal to binary",
+      "reteach_concepts": [
+        "Nutrient Sources",
+        "Sea Breeze And Land Breeze",
+        "Daily Life Examples"
+      ],
+      "speed_up_areas": [],
+      "students_to_watch": [
+        "Meera Khan",
+        "Kabir Ali",
+        "Arjun Mehta"
+      ],
+      "teacher_actions": [
+        "Use the next planned unit as tomorrow's starting point.",
+        "Reteach Nutrient Sources with a short check-for-understanding.",
+        "Reteach Sea Breeze And Land Breeze with a short check-for-understanding."
+      ]
+    },
+    "generated_by_model": "fallback",
+    "cache_metadata": {
+      "class_id": 1,
+      "subject_name": "Computer Science",
+      "saved_at": "2026-05-15"
+    }
+  },
+  "1:math": {
+    "context": {
+      "date": "2026-05-16",
+      "class": {
+        "grade": "7",
+        "section": "A",
+        "subject": "Math",
+        "student_count": 12,
+        "assessment_count": 7,
+        "avg_percentage": 71.2
+      },
+      "attendance": {
+        "present_count": 0,
+        "absent_count": 0,
+        "absent_students": []
+      },
+      "coverage": {
+        "id": 432,
+        "class_id": 1,
+        "teacher_id": 1,
+        "subject": "Math",
+        "plan_id": 406,
+        "timetable_slot_id": 2773,
+        "session_date": "2026-05-13",
+        "scheduled_start": "10:35",
+        "scheduled_end": "11:15",
+        "actual_start": "10:35",
+        "actual_end": "11:15",
+        "source": "audio_plus_note",
+        "transcript_text": "Teacher revised Fractions and Decimals, explained fraction multiplication, and flagged word problems for reteach.",
+        "coverage_json": "{\"chapter_name\": \"Fractions and Decimals\", \"subtopics_covered\": [\"fraction multiplication\"], \"reteach_topics\": [\"word problems\"], \"next_topics\": [\"decimal operations\"], \"coverage_percent\": 50.0}",
+        "confidence_score": 0.76,
+        "coverage_summary": "Math: covered fraction multiplication. Next up: decimal operations.",
+        "processing_status": "completed",
+        "processing_notes": "Seeded from combined audio and teacher note flow.",
+        "created_at": "2026-05-15 17:01:35",
+        "updated_at": "2026-05-15 17:01:35",
+        "coverage": {
+          "chapter_name": "Fractions and Decimals",
+          "subtopics_covered": [
+            "fraction multiplication"
+          ],
+          "reteach_topics": [
+            "word problems"
+          ],
+          "next_topics": [
+            "decimal operations"
+          ],
+          "coverage_percent": 50.0
+        }
+      },
+      "plan": {
+        "completion_percent": 39.5,
+        "upcoming_units": [
+          {
+            "id": 1629,
+            "plan_id": 406,
+            "chapter_code": "MAT-7-01",
+            "chapter_name": "Integers",
+            "subtopics_json": "[\"positive and negative numbers\", \"number line operations\", \"properties of addition\"]",
+            "recommended_sessions": 5,
+            "target_month": "April",
+            "term": "Term 1",
+            "sequence_order": 1,
+            "completed_subtopics_json": "[\"positive and negative numbers\", \"number line operations\", \"properties of addition\"]",
+            "completion_percent": 96.0,
+            "status": "in_progress",
+            "created_at": "2026-05-15 17:01:35",
+            "updated_at": "2026-05-15 17:01:35",
+            "subtopics": [
+              "positive and negative numbers",
+              "number line operations",
+              "properties of addition"
+            ],
+            "completed_subtopics": [
+              "positive and negative numbers",
+              "number line operations",
+              "properties of addition"
+            ]
+          },
+          {
+            "id": 1630,
+            "plan_id": 406,
+            "chapter_code": "MAT-7-02",
+            "chapter_name": "Fractions and Decimals",
+            "subtopics_json": "[\"fraction multiplication\", \"decimal operations\", \"word problems\"]",
+            "recommended_sessions": 6,
+            "target_month": "May",
+            "term": "Term 1",
+            "sequence_order": 2,
+            "completed_subtopics_json": "[\"fraction multiplication\", \"decimal operations\"]",
+            "completion_percent": 62.0,
+            "status": "in_progress",
+            "created_at": "2026-05-15 17:01:35",
+            "updated_at": "2026-05-15 17:01:35",
+            "subtopics": [
+              "fraction multiplication",
+              "decimal operations",
+              "word problems"
+            ],
+            "completed_subtopics": [
+              "fraction multiplication",
+              "decimal operations"
+            ]
+          },
+          {
+            "id": 1631,
+            "plan_id": 406,
+            "chapter_code": "MAT-7-03",
+            "chapter_name": "Simple Equations",
+            "subtopics_json": "[\"forming equations\", \"solving one-step equations\", \"checking solutions\"]",
+            "recommended_sessions": 5,
+            "target_month": "July",
+            "term": "Term 2",
+            "sequence_order": 3,
+            "completed_subtopics_json": "[]",
+            "completion_percent": 0.0,
+            "status": "not_started",
+            "created_at": "2026-05-15 17:01:35",
+            "updated_at": "2026-05-15 17:01:35",
+            "subtopics": [
+              "forming equations",
+              "solving one-step equations",
+              "checking solutions"
+            ],
+            "completed_subtopics": []
+          }
+        ]
+      },
+      "concept_gaps": [
+        {
+          "concept_id": 4818,
+          "concept_name": "Nutrient Sources",
+          "description": "Nutrient Sources in Nutrition in Plants",
+          "mastery_percent": 58.3,
+          "students_assessed": 12,
+          "students_lagging": 4,
+          "last_updated_at": "2026-05-12 12:00:00"
+        },
+        {
+          "concept_id": 4821,
+          "concept_name": "Sea Breeze And Land Breeze",
+          "description": "Sea Breeze And Land Breeze in Heat",
+          "mastery_percent": 58.3,
+          "students_assessed": 12,
+          "students_lagging": 4,
+          "last_updated_at": "2026-05-12 12:00:00"
+        },
+        {
+          "concept_id": 4824,
+          "concept_name": "Daily Life Examples",
+          "description": "Daily Life Examples in Acids Bases and Salts",
+          "mastery_percent": 58.3,
+          "students_assessed": 12,
+          "students_lagging": 4,
+          "last_updated_at": "2026-05-12 12:00:00"
+        },
+        {
+          "concept_id": 4827,
+          "concept_name": "Graphs",
+          "description": "Graphs in Motion and Time",
+          "mastery_percent": 58.3,
+          "students_assessed": 12,
+          "students_lagging": 4,
+          "last_updated_at": "2026-05-12 12:00:00"
+        },
+        {
+          "concept_id": 4830,
+          "concept_name": "Properties Of Addition",
+          "description": "Properties Of Addition in Integers",
+          "mastery_percent": 60.5,
+          "students_assessed": 12,
+          "students_lagging": 4,
+          "last_updated_at": "2026-05-12 12:00:00"
+        }
+      ],
+      "recent_assessments": [
+        {
+          "id": 574,
+          "title": "Math Quiz 2 - Fractions and Decimals",
+          "assessment_type": "class_test",
+          "delivery_mode": "google_form",
+          "language": "English + Hindi",
+          "total_marks": 18.0,
+          "google_form_url": "https://docs.google.com/forms/d/demo-form-004/edit",
+          "created_at": "2026-05-10 08:00:00",
+          "chapter_name": "Fractions and Decimals",
+          "avg_percentage": 62.6,
+          "submissions": 12
+        },
+        {
+          "id": 572,
+          "title": "Science Quiz 2 - Heat",
+          "assessment_type": "class_test",
+          "delivery_mode": "google_form",
+          "language": "English + Hindi",
+          "total_marks": 18.0,
+          "google_form_url": "https://docs.google.com/forms/d/demo-form-002/edit",
+          "created_at": "2026-05-08 08:00:00",
+          "chapter_name": "Heat",
+          "avg_percentage": 59.3,
+          "submissions": 12
+        },
+        {
+          "id": 576,
+          "title": "Computer Science Quiz - Number System",
+          "assessment_type": "practice",
+          "delivery_mode": "local",
+          "language": "English",
+          "total_marks": 18.0,
+          "google_form_url": null,
+          "created_at": "2026-05-05 08:00:00",
+          "chapter_name": "Number System",
+          "avg_percentage": 83.7,
+          "submissions": 12
+        }
+      ],
+      "support_students": [
+        {
+          "full_name": "Meera Khan",
+          "avg_percentage": 54.8,
+          "lagging_concepts": 308,
+          "attendance_percentage": 80.0
+        },
+        {
+          "full_name": "Kabir Ali",
+          "avg_percentage": 61.7,
+          "lagging_concepts": 168,
+          "attendance_percentage": 80.0
+        },
+        {
+          "full_name": "Arjun Mehta",
+          "avg_percentage": 62.4,
+          "lagging_concepts": 168,
+          "attendance_percentage": 90.0
+        },
+        {
+          "full_name": "Rahul Sethi",
+          "avg_percentage": 62.1,
+          "lagging_concepts": 112,
+          "attendance_percentage": 90.0
+        },
+        {
+          "full_name": "Ishaan Rao",
+          "avg_percentage": 67.6,
+          "lagging_concepts": 28,
+          "attendance_percentage": 100.0
+        }
+      ]
+    },
+    "brief": {
+      "daily_summary": "Attendance today: 0 present, 0 absent. Plan completion for Math: 39.5%.",
+      "next_concept_to_teach": "positive and negative numbers, number line operations",
+      "reteach_concepts": [
+        "Nutrient Sources",
+        "Sea Breeze And Land Breeze",
+        "Daily Life Examples"
+      ],
+      "speed_up_areas": [],
+      "students_to_watch": [
+        "Meera Khan",
+        "Kabir Ali",
+        "Arjun Mehta"
+      ],
+      "teacher_actions": [
+        "Use the next planned unit as tomorrow's starting point.",
+        "Reteach Nutrient Sources with a short check-for-understanding.",
+        "Reteach Sea Breeze And Land Breeze with a short check-for-understanding."
+      ]
+    },
+    "generated_by_model": "fallback",
+    "cache_metadata": {
+      "class_id": 1,
+      "subject_name": "Math",
+      "saved_at": "2026-05-16"
+    }
+  }
+}
