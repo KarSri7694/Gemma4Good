@@ -4,10 +4,12 @@ from dataclasses import dataclass
 import os
 from pathlib import Path
 import re
+import tomllib
 
 
 ROOT = Path(__file__).resolve().parent.parent
 MODEL_CONTROL_PATH = ROOT / "model_control.env"
+STREAMLIT_SECRETS_PATH = ROOT / ".streamlit" / "secrets.toml"
 
 
 @dataclass
@@ -30,8 +32,19 @@ class ModelSamplingConfig:
     rag_top_k: int = 5
 
 
+def _load_streamlit_secrets(path: Path = STREAMLIT_SECRETS_PATH) -> dict[str, str]:
+    if not path.exists():
+        return {}
+    try:
+        data = tomllib.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return {key: str(value).strip() for key, value in data.items() if value is not None}
+
+
 def load_model_sampling_config(path: Path = MODEL_CONTROL_PATH) -> ModelSamplingConfig:
     values: dict[str, str] = {}
+    secrets = _load_streamlit_secrets()
     if path.exists():
         for raw_line in path.read_text(encoding="utf-8").splitlines():
             line = raw_line.strip()
@@ -41,7 +54,7 @@ def load_model_sampling_config(path: Path = MODEL_CONTROL_PATH) -> ModelSampling
             values[key.strip()] = value.strip()
 
     def get_value(key: str, default: str) -> str:
-        return os.getenv(key, values.get(key, default)).strip()
+        return os.getenv(key, secrets.get(key, values.get(key, default))).strip()
 
     return ModelSamplingConfig(
         provider=get_value("PROVIDER", "LOCAL").upper(),
@@ -50,7 +63,7 @@ def load_model_sampling_config(path: Path = MODEL_CONTROL_PATH) -> ModelSampling
         top_k=int(get_value("LLAMA_TOP_K", "40")),
         llama_base_url=get_value("LLAMA_BASE_URL", "http://127.0.0.1:8080"),
         llama_model_name=get_value("LLAMA_MODEL_NAME", "Gemma-4-E4B-Q4_K_M"),
-        openrouter_api_key=os.getenv("OPENROUTER_API_KEY", "").strip(),
+        openrouter_api_key=get_value("OPENROUTER_API_KEY", ""),
         quiz_question_generation_mode=get_value("QUIZ_QUESTION_GENERATION_MODE", "AUTO").upper(),
         auto_grade_poll_interval_seconds=int(get_value("AUTO_GRADE_POLL_INTERVAL_SECONDS", "15")),
         max_agent_iterations=int(get_value("MAX_AGENT_ITERATIONS", "10")),
