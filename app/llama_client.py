@@ -120,6 +120,17 @@ class LlamaServerClient:
             payload.update(extra_payload)
         return self._post("/v1/embeddings", payload)
 
+    def transcriptions(
+        self,
+        *,
+        input_audio: dict[str, Any],
+        extra_payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {"input_audio": input_audio}
+        if extra_payload:
+            payload.update(extra_payload)
+        return self._post("/v1/audio/transcriptions", payload)
+
     def tokenize(self, content: str, add_special: bool = False, parse_special: bool = False) -> dict[str, Any]:
         self._require_local_feature("tokenize")
         payload = {

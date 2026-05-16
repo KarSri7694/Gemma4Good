@@ -21,6 +21,7 @@ class ModelSamplingConfig:
     llama_base_url: str = "http://127.0.0.1:8080"
     llama_model_name: str = "Gemma-4-E4B-Q4_K_M"
     openrouter_api_key: str = ""
+    openrouter_transcription_model: str = "openai/whisper-1"
     quiz_question_generation_mode: str = "AUTO"
     auto_grade_poll_interval_seconds: int = 15
     max_agent_iterations: int = 10
@@ -64,6 +65,7 @@ def load_model_sampling_config(path: Path = MODEL_CONTROL_PATH) -> ModelSampling
         llama_base_url=get_value("LLAMA_BASE_URL", "http://127.0.0.1:8080"),
         llama_model_name=get_value("LLAMA_MODEL_NAME", "Gemma-4-E4B-Q4_K_M"),
         openrouter_api_key=get_value("OPENROUTER_API_KEY", ""),
+        openrouter_transcription_model=get_value("OPENROUTER_TRANSCRIPTION_MODEL", "openai/whisper-1"),
         quiz_question_generation_mode=get_value("QUIZ_QUESTION_GENERATION_MODE", "AUTO").upper(),
         auto_grade_poll_interval_seconds=int(get_value("AUTO_GRADE_POLL_INTERVAL_SECONDS", "15")),
         max_agent_iterations=int(get_value("MAX_AGENT_ITERATIONS", "10")),

@@ -177,6 +177,66 @@ class TeachingPlannerService:
     def _normalize_name(self, value: str) -> str:
         return re.sub(r"[^a-z0-9]+", " ", str(value).lower()).strip()
 
+    def _audio_format_from_mime(self, audio_mime_type: str) -> str:
+        normalized_mime = (audio_mime_type or "").lower()
+        if "mpeg" in normalized_mime or "mp3" in normalized_mime:
+            return "mp3"
+        if "ogg" in normalized_mime:
+            return "ogg"
+        if "webm" in normalized_mime:
+            return "webm"
+        if "m4a" in normalized_mime or "mp4" in normalized_mime:
+            return "m4a"
+        return "wav"
+
+    def _transcribe_audio_with_provider(
+        self,
+        *,
+        client: LlamaServerClient,
+        audio_b64: str,
+        audio_format: str,
+        local_model_name: str,
+        prompt_hint: str = "",
+    ) -> str:
+        sampling = load_model_sampling_config()
+        if client.provider == "OPENROUTER":
+            response = client.transcriptions(
+                input_audio={"data": audio_b64, "format": audio_format},
+                extra_payload={"model": sampling.openrouter_transcription_model},
+            )
+            transcript = str(response.get("text") or "").strip()
+        else:
+            response = client.chat_completion(
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": (
+                                    "Transcribe this teacher audio into plain text. "
+                                    "Keep the wording faithful, remove filler when it does not change meaning, "
+                                    "and return only the transcript."
+                                    + (f" Context hint: {prompt_hint.strip()}" if prompt_hint.strip() else "")
+                                ),
+                            },
+                            {
+                                "type": "input_audio",
+                                "input_audio": {"data": audio_b64, "format": audio_format},
+                            },
+                        ],
+                    }
+                ],
+                temperature=0.1,
+                top_p=0.9,
+                top_k=40,
+                extra_payload={"model": local_model_name, "max_tokens": -1},
+            )
+            transcript = self._extract_text(response).strip()
+        if not transcript:
+            raise ValueError("Audio transcription returned an empty result.")
+        return transcript
+
     def get_capture_support_status(self) -> dict[str, Any]:
         sounddevice_available = SOUNDDEVICE_RECORDER.is_supported()
         return {
@@ -220,44 +280,16 @@ class TeachingPlannerService:
     ) -> str:
         if not audio_bytes:
             raise ValueError("Audio input is empty.")
-        audio_format = "wav"
-        normalized_mime = (audio_mime_type or "").lower()
-        if "mpeg" in normalized_mime or "mp3" in normalized_mime:
-            audio_format = "mp3"
-        elif "ogg" in normalized_mime:
-            audio_format = "ogg"
+        audio_format = self._audio_format_from_mime(audio_mime_type)
         audio_b64 = base64.b64encode(audio_bytes).decode("utf-8")
         client = LlamaServerClient(LlamaServerConfig(base_url=llama_base_url))
-        response = client.chat_completion(
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": (
-                                "Transcribe this teacher audio into plain text. "
-                                "Keep the wording faithful, remove filler when it does not change meaning, "
-                                "and return only the transcript."
-                                + (f" Context hint: {prompt_hint.strip()}" if prompt_hint.strip() else "")
-                            ),
-                        },
-                        {
-                            "type": "input_audio",
-                            "input_audio": {"data": audio_b64, "format": audio_format},
-                        },
-                    ],
-                }
-            ],
-            temperature=0.1,
-            top_p=0.9,
-            top_k=40,
-            extra_payload={"model": llama_model_name, "max_tokens": -1},
+        return self._transcribe_audio_with_provider(
+            client=client,
+            audio_b64=audio_b64,
+            audio_format=audio_format,
+            local_model_name=llama_model_name,
+            prompt_hint=prompt_hint,
         )
-        transcript = self._extract_text(response).strip()
-        if not transcript:
-            raise ValueError("Audio transcription returned an empty result.")
-        return transcript
 
     def _extract_text_from_image_bytes(
         self,
@@ -1130,57 +1162,72 @@ class TeachingPlannerService:
             f"- {item.get('chapter_name', '')}: {', '.join(item.get('subtopics', [])[:8]) or 'No subtopics'}"
             for item in units[:20]
         ) or "- No plan units available."
-        audio_format = "wav"
-        if "mpeg" in audio_mime_type or "mp3" in audio_mime_type:
-            audio_format = "mp3"
-        elif "ogg" in audio_mime_type:
-            audio_format = "ogg"
-        elif "webm" in audio_mime_type:
-            audio_format = "wav"
+        audio_format = self._audio_format_from_mime(audio_mime_type)
         audio_b64 = base64.b64encode(audio_bytes).decode("utf-8")
-        response = client.chat_completion(
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "You are a classroom teaching-progress tracker. "
-                        "Focus on the teacher's instructional speech and ignore student noise unless it changes what was taught. "
-                        "Return strict JSON only with this shape: "
-                        "{\"teacher_transcript\":\"string\",\"chapter_name\":\"string\",\"chapter_code\":\"string\","
-                        "\"covered_subtopics\":[\"string\"],\"mentioned_not_taught\":[\"string\"],"
-                        "\"homework_or_next_class\":[\"string\"],\"coverage_summary\":\"string\","
-                        "\"completion_signal\":\"partial|mostly_complete|complete\","
-                        "\"pace_status\":\"behind|on_track|ahead|unknown\",\"coverage_confidence\":0.0}"
-                    ),
-                },
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": (
-                                "Analyze this classroom recording.\n"
-                                "Extract only the teacher-side transcript relevant to what was taught.\n"
-                                "Map the taught material to the year-plan units below.\n"
-                                "Do not mark a subtopic complete if it was only mentioned briefly.\n"
-                                f"Teacher note: {teacher_note.strip() or 'None'}\n\n"
-                                "Year plan units:\n"
-                                f"{plan_summary}"
-                            ),
-                        },
-                        {
-                            "type": "input_audio",
-                            "input_audio": {"data": audio_b64, "format": audio_format},
-                        },
-                    ],
-                },
-            ],
-            temperature=0.1,
-            top_p=0.9,
-            top_k=40,
-            response_format={"type": "json_object"},
-            extra_payload={"model": llama_model_name, "max_tokens": -1},
+        system_prompt = (
+            "You are a classroom teaching-progress tracker. "
+            "Focus on the teacher's instructional speech and ignore student noise unless it changes what was taught. "
+            "Return strict JSON only with this shape: "
+            "{\"teacher_transcript\":\"string\",\"chapter_name\":\"string\",\"chapter_code\":\"string\","
+            "\"covered_subtopics\":[\"string\"],\"mentioned_not_taught\":[\"string\"],"
+            "\"homework_or_next_class\":[\"string\"],\"coverage_summary\":\"string\","
+            "\"completion_signal\":\"partial|mostly_complete|complete\","
+            "\"pace_status\":\"behind|on_track|ahead|unknown\",\"coverage_confidence\":0.0}"
         )
+        user_prompt = (
+            "Analyze this classroom recording.\n"
+            "Extract only the teacher-side transcript relevant to what was taught.\n"
+            "Map the taught material to the year-plan units below.\n"
+            "Do not mark a subtopic complete if it was only mentioned briefly.\n"
+            f"Teacher note: {teacher_note.strip() or 'None'}\n\n"
+            "Year plan units:\n"
+            f"{plan_summary}"
+        )
+        if client.provider == "OPENROUTER":
+            transcript = self._transcribe_audio_with_provider(
+                client=client,
+                audio_b64=audio_b64,
+                audio_format=audio_format,
+                local_model_name=llama_model_name,
+                prompt_hint="Classroom recording for teaching coverage analysis.",
+            )
+            response = client.chat_completion(
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {
+                        "role": "user",
+                        "content": (
+                            f"{user_prompt}\n\nTeacher transcript:\n{transcript}"
+                        ),
+                    },
+                ],
+                temperature=0.1,
+                top_p=0.9,
+                top_k=40,
+                response_format={"type": "json_object"},
+                extra_payload={"model": llama_model_name, "max_tokens": -1},
+            )
+        else:
+            response = client.chat_completion(
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": user_prompt},
+                            {
+                                "type": "input_audio",
+                                "input_audio": {"data": audio_b64, "format": audio_format},
+                            },
+                        ],
+                    },
+                ],
+                temperature=0.1,
+                top_p=0.9,
+                top_k=40,
+                response_format={"type": "json_object"},
+                extra_payload={"model": llama_model_name, "max_tokens": -1},
+            )
         content = self._extract_text(response)
         parsed = self._parse_json_content(content)
         if not parsed:

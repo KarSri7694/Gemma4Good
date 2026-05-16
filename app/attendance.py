@@ -66,6 +66,18 @@ class AttendanceService:
             return []
         return [item.strip() for item in re.split(r"[,\n;]+", value) if item.strip()]
 
+    def _audio_format_from_mime(self, audio_mime_type: str) -> str:
+        normalized_mime = (audio_mime_type or "").lower()
+        if "mpeg" in normalized_mime or "mp3" in normalized_mime:
+            return "mp3"
+        if "ogg" in normalized_mime:
+            return "ogg"
+        if "webm" in normalized_mime:
+            return "webm"
+        if "m4a" in normalized_mime or "mp4" in normalized_mime:
+            return "m4a"
+        return "wav"
+
     def parse_absent_students_from_audio(
         self,
         *,
@@ -100,37 +112,62 @@ class AttendanceService:
             "Roster:\n"
             f"{roster_lines}\n"
         )
-        audio_format = "wav"
-        if "mpeg" in audio_mime_type or "mp3" in audio_mime_type:
-            audio_format = "mp3"
-        elif "ogg" in audio_mime_type:
-            audio_format = "ogg"
+        audio_format = self._audio_format_from_mime(audio_mime_type)
 
-        response = client.chat_completion(
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": prompt_text},
-                        {
-                            "type": "input_audio",
-                            "input_audio": {
-                                "data": audio_b64,
-                                "format": audio_format,
+        if client.provider == "OPENROUTER":
+            transcription = client.transcriptions(
+                input_audio={"data": audio_b64, "format": audio_format},
+                extra_payload={"model": sampling.openrouter_transcription_model},
+            )
+            transcript = str(transcription.get("text") or "").strip()
+            if not transcript:
+                raise ValueError("Audio transcription returned an empty result.")
+            response = client.chat_completion(
+                messages=[
+                    {
+                        "role": "user",
+                        "content": (
+                            f"{prompt_text}\n"
+                            "Teacher transcript:\n"
+                            f"{transcript}"
+                        ),
+                    }
+                ],
+                temperature=min(sampling.temperature, 0.2),
+                top_p=sampling.top_p,
+                top_k=sampling.top_k,
+                extra_payload={
+                    "model": model_name,
+                    "max_tokens": -1,
+                    "reasoning_format": "auto",
+                },
+            )
+        else:
+            response = client.chat_completion(
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": prompt_text},
+                            {
+                                "type": "input_audio",
+                                "input_audio": {
+                                    "data": audio_b64,
+                                    "format": audio_format,
+                                },
                             },
-                        },
-                    ],
-                }
-            ],
-            temperature=min(sampling.temperature, 0.2),
-            top_p=sampling.top_p,
-            top_k=sampling.top_k,
-            extra_payload={
-                "model": model_name,
-                "max_tokens": -1,
-                "reasoning_format": "auto",
-            },
-        )
+                        ],
+                    }
+                ],
+                temperature=min(sampling.temperature, 0.2),
+                top_p=sampling.top_p,
+                top_k=sampling.top_k,
+                extra_payload={
+                    "model": model_name,
+                    "max_tokens": -1,
+                    "reasoning_format": "auto",
+                },
+            )
         content = self.extract_text(response)
         parsed = self.parse_json_content(content)
         if not parsed:
