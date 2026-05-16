@@ -1,5 +1,11 @@
 from __future__ import annotations
 
+"""Teaching progress, recording, and planning helpers.
+
+This module is the service layer for workflows that combine teacher input,
+AI extraction, and academic planning persistence.
+"""
+
 import base64
 from io import BytesIO
 from datetime import datetime
@@ -37,6 +43,8 @@ WEEKDAY_LABELS = {key: value for key, value in WEEKDAY_OPTIONS}
 
 
 class SoundDeviceRecorder:
+    """Wrapper around the optional `sounddevice` dependency for local capture."""
+
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._stream = None
@@ -112,6 +120,8 @@ class SoundDeviceRecorder:
         stream.close()
 
         wav_buffer = BytesIO()
+        # WAV is used because it is simple to generate locally and easy to pass
+        # to downstream transcription providers.
         with wave.open(wav_buffer, "wb") as wav_file:
             wav_file.setnchannels(self._channels)
             wav_file.setsampwidth(2)
@@ -197,6 +207,7 @@ class TeachingPlannerService:
         local_model_name: str,
         prompt_hint: str = "",
     ) -> str:
+        """Route audio transcription through the configured provider."""
         sampling = load_model_sampling_config()
         if client.provider == "OPENROUTER":
             response = client.transcriptions(
@@ -298,6 +309,7 @@ class TeachingPlannerService:
         llama_base_url: str,
         llama_model_name: str,
     ) -> str:
+        """Use the vision-capable model path to read syllabus/timetable images."""
         client = LlamaServerClient(LlamaServerConfig(base_url=llama_base_url))
         image_b64 = base64.b64encode(image_bytes).decode("utf-8")
         response = client.chat_completion(
@@ -327,6 +339,7 @@ class TeachingPlannerService:
         return self._extract_text(response)
 
     def _read_pdf_text(self, pdf_bytes: bytes) -> str:
+        """Prefer local PDF text extraction before invoking any model."""
         try:
             from pypdf import PdfReader
         except ImportError as exc:  # pragma: no cover - dependency-gated
@@ -350,6 +363,7 @@ class TeachingPlannerService:
         llama_model_name: str,
         use_llama_server: bool,
     ) -> str:
+        """Normalize teacher uploads into plain text for later parsing steps."""
         if not content_bytes:
             raise ValueError("Uploaded file is empty.")
         normalized_name = (original_filename or "").lower()
@@ -426,6 +440,7 @@ class TeachingPlannerService:
         return units
 
     def _normalize_plan_units(self, units: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Clean and deduplicate model-produced syllabus units before storage."""
         normalized: list[dict[str, Any]] = []
         seen: set[str] = set()
         for index, unit in enumerate(units, start=1):
@@ -467,6 +482,7 @@ class TeachingPlannerService:
         llama_base_url: str,
         llama_model_name: str,
     ) -> dict[str, Any]:
+        """Convert a single-subject syllabus into a yearly teaching plan."""
         client = LlamaServerClient(LlamaServerConfig(base_url=llama_base_url))
         response = client.chat_completion(
             messages=[
@@ -514,6 +530,7 @@ class TeachingPlannerService:
         llama_base_url: str,
         llama_model_name: str,
     ) -> dict[str, Any]:
+        """Split a full-grade syllabus into subject-wise plans."""
         client = LlamaServerClient(LlamaServerConfig(base_url=llama_base_url))
         response = client.chat_completion(
             messages=[
@@ -551,6 +568,7 @@ class TeachingPlannerService:
         return parsed
 
     def _fallback_parse_grade_syllabus(self, syllabus_text: str) -> list[dict[str, Any]]:
+        """Fallback splitter used when model-based subject separation is unavailable."""
         subjects: list[dict[str, Any]] = []
         current_subject = ""
         buffer: list[str] = []
@@ -605,6 +623,7 @@ class TeachingPlannerService:
         generated_by_model: str,
         medium: str = "",
     ) -> dict[str, Any]:
+        """Persist normalized syllabus output into curriculum and plan tables."""
         normalized_units = self._normalize_plan_units(units)
         if not normalized_units:
             raise ValueError(f"No chapters were parsed for subject '{subject_name}'.")
@@ -649,6 +668,7 @@ class TeachingPlannerService:
         llama_base_url: str,
         llama_model_name: str,
     ) -> dict[str, Any]:
+        """Ask the model to extract timetable slots for one subject."""
         client = LlamaServerClient(LlamaServerConfig(base_url=llama_base_url))
         response = client.chat_completion(
             messages=[
@@ -699,6 +719,7 @@ class TeachingPlannerService:
         return f"{hour:02d}:{minute:02d}"
 
     def _fallback_parse_timetable(self, *, timetable_text: str, subject: str) -> list[dict[str, Any]]:
+        """Rule-based timetable extraction used when AI parsing is unavailable."""
         slots: list[dict[str, Any]] = []
         subject_key = self._normalize_name(subject)
         weekday_names = {label.lower(): key for key, label in WEEKDAY_OPTIONS}
@@ -740,6 +761,7 @@ class TeachingPlannerService:
         llama_model_name: str,
         use_llama_server: bool,
     ) -> list[dict[str, Any]]:
+        """Parse, normalize, and save timetable slots for the selected subject."""
         timetable_text = timetable_text.strip()
         if not timetable_text:
             raise ValueError("Timetable text is required.")

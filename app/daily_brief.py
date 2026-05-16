@@ -1,5 +1,11 @@
 from __future__ import annotations
 
+"""Daily Gemma analysis generation and cache management.
+
+The dashboard uses this service to show a saved analysis immediately on startup
+and refresh it with a model-backed summary only when needed.
+"""
+
 from dataclasses import dataclass
 from datetime import date
 import json
@@ -81,6 +87,7 @@ class DailyLoopService:
         return [str(value).strip()] if str(value).strip() else []
 
     def _normalize_brief_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Force model output into the list/string structure expected by the UI."""
         normalized = dict(payload or {})
         normalized["daily_summary"] = str(normalized.get("daily_summary") or "").strip()
         normalized["next_concept_to_teach"] = str(normalized.get("next_concept_to_teach") or "").strip()
@@ -104,6 +111,7 @@ class DailyLoopService:
         plan_snapshot: dict[str, Any],
         for_date: str,
     ) -> dict[str, Any]:
+        """Assemble a compact classroom snapshot for daily analysis."""
         attendance_by_student_id = {int(item["student_id"]): item for item in attendance_rows if item.get("student_id") is not None}
         absent_students = [
             {
@@ -160,6 +168,7 @@ class DailyLoopService:
         }
 
     def _fallback_brief(self, context: dict[str, Any]) -> dict[str, Any]:
+        """Deterministic summary used when a model call is skipped or fails."""
         concept_gaps = context.get("concept_gaps", [])
         upcoming_units = context.get("plan", {}).get("upcoming_units", [])
         latest_coverage = context.get("coverage") or {}
@@ -216,6 +225,8 @@ class DailyLoopService:
         class_id: int,
         subject_name: str,
     ) -> dict[str, Any] | None:
+        # Cache by class and subject so the dashboard can restore the last shown
+        # analysis quickly on the next app launch.
         cache_store = self._load_cache_store()
         cache_item = cache_store.get(self._cache_key(class_id=class_id, subject_name=subject_name))
         if not isinstance(cache_item, dict):

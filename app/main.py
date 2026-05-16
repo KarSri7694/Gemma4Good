@@ -1,5 +1,18 @@
 from __future__ import annotations
 
+"""Main Streamlit application entry point.
+
+This file wires together the teacher-facing workspaces:
+- dashboard and daily Gemma analysis
+- attendance capture and class overview
+- timetable and syllabus ingestion
+- quiz generation and assessment review
+- multimodal chat with Gemma
+
+Persistent records live in repository modules and model-backed extraction lives
+in service modules. The UI layer here mostly coordinates those pieces.
+"""
+
 import atexit
 import asyncio
 import json
@@ -67,6 +80,7 @@ _SHUTDOWN_HOOKS_REGISTERED = False
 
 
 def _cleanup_mcp_bridge_sync() -> None:
+    """Release background resources during app shutdown."""
     try:
         if DEFAULT_TEACHING_PLANNER_SERVICE.get_local_recorder_status().get("active"):
             DEFAULT_TEACHING_PLANNER_SERVICE.stop_local_microphone_recording()
@@ -98,6 +112,8 @@ def _register_shutdown_hooks() -> None:
         return
 
     atexit.register(_cleanup_mcp_bridge_sync)
+    # Signal handlers only make sense on the main thread and should be
+    # registered once even though Streamlit reruns this script frequently.
     if threading.current_thread() is threading.main_thread():
         for signal_name in ("SIGINT", "SIGTERM", "SIGBREAK"):
             signal_value = getattr(signal, signal_name, None)
@@ -131,6 +147,7 @@ def build_teacher_chat_prompt_from_inputs(
     llama_model_name: str,
     use_llama_server: bool,
 ) -> str:
+    """Merge teacher text, audio, and uploads into one chat request."""
     input_key = f"teacher_chat_input_{class_id}"
     prompt_parts: list[str] = []
     typed_prompt = str(st.session_state.get(input_key, "")).strip()
@@ -149,6 +166,8 @@ def build_teacher_chat_prompt_from_inputs(
 
     extracted_file_parts: list[str] = []
     for uploaded_file in uploaded_chat_files or []:
+        # Normalize documents to text so Gemma can reason over them in the same
+        # conversation turn instead of treating them as opaque attachments.
         extracted_text = DEFAULT_TEACHING_PLANNER_SERVICE.extract_uploaded_text(
             content_bytes=uploaded_file.getvalue(),
             mime_type=uploaded_file.type or "",
@@ -175,6 +194,7 @@ def choose_auto_quiz_target(
     llama_model_name: str,
     use_llama_server: bool,
 ) -> dict[str, str]:
+    """Choose the next quiz target from curriculum coverage and quiz history."""
     subject_chapter_map: dict[str, list[dict[str, str]]] = {}
     for item in class_subjects:
         subject_name = str(item.get("subject") or "").strip()
@@ -1309,6 +1329,8 @@ if (
     and latest_attendance_result.get("records")
 ):
     dashboard_attendance_rows = latest_attendance_result["records"]
+# The dashboard summary intentionally reuses persisted attendance for the
+# current day so the top banner and overview stay in sync after reruns.
 render_workspace_banner(
     class_label=f"Grade {overview.get('grade', '')}-{overview.get('section', '')}",
     subject_name=selected_subject_name,

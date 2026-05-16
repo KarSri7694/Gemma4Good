@@ -1,170 +1,82 @@
 # Pathshala Play
 
-`Pathshala Play` is an offline-first AI classroom co-pilot for mixed-ability learners.
+`Pathshala Play` is a Streamlit-based classroom copilot built around Gemma-style workflows for teachers.
 
-It helps a teacher turn one lesson into:
+The application combines:
 
-- age-appropriate explanations for slow, average, and fast learners
-- quick visual quiz/game activities that keep attention high
-- recurring doubt summaries across the class
-- accessible alternatives for differently abled learners
+- class dashboard and daily Gemma analysis
+- syllabus and timetable ingestion from text, PDF, and images
+- quiz generation and assessment review
+- attendance capture, including audio-assisted flows
+- teaching progress tracking and post-class analysis
+- chat with Gemma using text, uploads, and recorded audio
 
-The project is aimed at the `Future of Education` track of the `Gemma 4 Good Hackathon`.
+## Current Architecture
 
-## Why This Idea
+The app is intentionally split into three layers:
 
-The strongest signal in the initial notes is a real classroom problem:
+- `app/main.py`: Streamlit UI orchestration
+- `app/repository.py`: database access and persistence helpers
+- service modules such as `app/teaching_progress.py`, `app/daily_brief.py`, and `app/material_ingestion.py`: AI-assisted extraction and workflow logic
 
-- one teacher serves students with different learning speeds
-- class time is limited
-- recurring doubts are hard to track manually
-- engagement drops when content is too static
-- accessibility needs are often handled late or poorly
+Gemma is used as an analysis and extraction layer, not as the system of record. Persistent data still lives in SQLite and is accessed through repository modules.
 
-This is a better hackathon project than a generic chatbot because it solves a concrete workflow for a specific user: the teacher.
+## Key Flows
 
-## Product Pitch
+1. Teacher selects a class and subject workspace.
+2. The app loads canonical state from SQLite repositories.
+3. Uploaded or recorded inputs are converted to text or structured data through service modules.
+4. Gemma-assisted workflows generate recommendations, plans, quiz targets, or extracted records.
+5. Normalized outputs are written back to storage and reused across tabs.
 
-Given a lesson topic, grade level, and optional worksheet/image, the app generates:
+## Important Files
 
-1. three difficulty-calibrated explanations
-2. a short game or quiz activity
-3. likely misconceptions and teacher follow-up prompts
-4. an accessibility-aware version of the same content
-5. a class doubt digest after student interactions
+- [app/main.py](/D:/Projects/Gemma4Good/app/main.py:1): main Streamlit app
+- [app/repository.py](/D:/Projects/Gemma4Good/app/repository.py:1): persistence layer
+- [app/teaching_progress.py](/D:/Projects/Gemma4Good/app/teaching_progress.py:1): timetable, syllabus, and recording workflows
+- [app/daily_brief.py](/D:/Projects/Gemma4Good/app/daily_brief.py:1): daily Gemma analysis and cache
+- [db/schema.sql](/D:/Projects/Gemma4Good/db/schema.sql:1): database schema
+- [scripts/run_streamlit_app.py](/D:/Projects/Gemma4Good/scripts/run_streamlit_app.py:1): recommended launcher
 
-## Why Gemma 4 Fits
+## Setup
 
-Gemma 4 is relevant here because the hackathon explicitly emphasizes:
+Install dependencies:
 
-- local or edge deployment
-- multimodal understanding
-- native tool use / agentic workflows
-- meaningful real-world impact
+```powershell
+pip install -r requirements.txt
+```
 
-This project can use those capabilities directly:
-
-- `multimodal`: understand textbook images, worksheets, diagrams
-- `tool use`: call quiz generators, rubric scorers, local storage, analytics
-- `edge/local`: preserve privacy in schools with weak connectivity
-- `multilingual`: adapt content for local language support
-
-## MVP
-
-The first working version should do only this:
-
-1. Teacher enters topic, grade, subject, and class profile.
-2. Teacher optionally uploads lesson text or an image.
-3. System generates:
-   - simple / standard / advanced explanation
-   - 5-question quiz
-   - 1 short game prompt
-   - misconception checklist
-   - accessibility adaptations
-4. Teacher reviews and exports the plan.
-5. Student answers are summarized into recurring doubts.
-
-## Demo Story
-
-The best demo is:
-
-1. A teacher in a low-resource classroom has one science lesson and mixed-ability students.
-2. The teacher uploads a worksheet/photo and picks class level.
-3. The app instantly creates differentiated teaching material.
-4. Students answer a short game/quiz.
-5. The app clusters doubts and suggests what to reteach tomorrow.
-
-That gives a clean impact story, visible utility, and a real end-to-end workflow.
-
-## Suggested Stack
-
-- `Frontend`: Streamlit or Gradio for fast demo velocity
-- `Backend`: Python
-- `Model runtime`:
-  - local: Ollama / llama.cpp / Kaggle model access
-  - larger hosted prototype: Kaggle / Hugging Face / Vertex if needed
-- `Storage`: local JSON or SQLite
-- `Optional`: simple retrieval layer for lesson plans and curriculum snippets
-
-## Repo Plan
-
-- `docs/idea-brief.md`: product framing, judging angle, and scope
-- `app/`: application code
-- `db/schema.sql`: SQLite schema for classroom, quiz, and mastery analytics
-- `data/`: sample lessons and test inputs
-- `prompts/`: generation prompts for teacher flows
-- `notebooks/`: experiments and evaluation
-
-## Database Setup
-
-For the demo, the project uses `SQLite`.
-
-Create the local database with:
+Initialize the database if needed:
 
 ```powershell
 python scripts/init_db.py
 ```
 
-That creates `data/pathshala_play.db` using [schema.sql](db/schema.sql).
-
-## Runtime Configuration
-
-Machine-specific runtime values now live in `model_control.env` instead of being hardcoded in the Python source.
-
-- Set `LLAMA_BASE_URL` and `LLAMA_MODEL_NAME` for the llama.cpp server available on the current machine.
-- Set `TAVILY_API_KEY` in your shell environment if you want the optional Tavily MCP server to connect.
-- Keep model files under `models/Google/` if you want to use the checked-in `model_presets.ini` as-is, or update that file to point at your local model directory.
-- Environment variables override `model_control.env`, so CI or another machine can supply different values without editing the repo.
-
-## Automatic Grading Worker
-
-To automatically poll linked Google Forms and queue new submissions for Gemma grading, run:
-
-```powershell
-python scripts/auto_grade_worker.py
-```
-
-## Run The App
-
-To start the Streamlit app with a shutdown wrapper that handles `Ctrl+C` cleanly, run:
+Run the app:
 
 ```powershell
 python scripts/run_streamlit_app.py
 ```
 
-## FastMCP Teacher Tool Servers
+## Runtime Configuration
 
-Teacher-facing MCP servers are defined in [mcp.json](mcp.json).
+Machine-specific model and endpoint values live in `model_control.env`.
 
-The repo now follows the same pattern as your other project:
+Typical settings include:
 
-- `mcp.json` contains an `mcpServers` object
-- each server entry declares its own launch command
-- the bridge starts and connects to every configured server automatically
-- relative script paths in `mcp.json` are resolved from the repo config file, so the setup is portable across machines
+- `LLAMA_BASE_URL`
+- `LLAMA_MODEL_NAME`
+- provider-specific model names for transcription or grading
 
-Use your bridge to start and connect to all configured MCP servers with:
+Environment variables can override those values on another machine without changing the repository.
 
-```powershell
-python scripts/run_mcp_bridge.py
-```
+## AI Design Notes
 
-Optionally execute a tool after connecting:
+- The embedding server is optional. The app should continue working without it.
+- Daily dashboard analysis is cached so startup is fast after restart.
+- Uploaded PDFs prefer local text extraction first; images use model-based interpretation.
 
-```powershell
-python scripts/run_mcp_bridge.py --tool answer_subject_question --tool-args "{\"question\":\"Explain photosynthesis simply\"}"
-```
+## Documentation
 
-The local teacher server is now a directly runnable FastMCP module at [teacher_tools.py](mcp_servers/teacher_tools.py).
-
-## Immediate Next Step
-
-Build the smallest demo around one subject and one age band.
-
-Recommended default:
-
-- subject: `Science`
-- grade: `6-8`
-- lesson type: `worksheet + concept explanation`
-
-That is narrow enough to finish before the deadline and broad enough to demonstrate impact.
+- [docs/architecture.md](/D:/Projects/Gemma4Good/docs/architecture.md:1)
+- [docs/codebase-guide.md](/D:/Projects/Gemma4Good/docs/codebase-guide.md:1)

@@ -1,5 +1,11 @@
 from __future__ import annotations
 
+"""Repository layer for persistent classroom data access.
+
+Keeping SQL here prevents the Streamlit UI and AI service layers from each
+implementing their own storage rules.
+"""
+
 import json
 from typing import Any
 
@@ -29,6 +35,7 @@ def create_class_for_teacher(
     subject: str,
     medium: str,
 ) -> int:
+    """Create a class row and seed its primary subject mapping."""
     with get_connection() as connection:
         teacher_row = connection.execute(
             "SELECT school_id FROM teachers WHERE id = ?",
@@ -91,6 +98,7 @@ def update_class_details(
 
 
 def list_teacher_classes(teacher_id: int) -> list[dict[str, Any]]:
+    """Return classes with small aggregates for selector and dashboard use."""
     with get_connection() as connection:
         rows = connection.execute(
             """
@@ -124,6 +132,7 @@ def list_teacher_classes(teacher_id: int) -> list[dict[str, Any]]:
 
 
 def get_class_overview(class_id: int) -> dict[str, Any]:
+    """Return a single summary payload reused across multiple screens."""
     with get_connection() as connection:
         overview = connection.execute(
             """
@@ -158,6 +167,7 @@ def get_class_overview(class_id: int) -> dict[str, Any]:
 
 
 def list_class_students(class_id: int) -> list[dict[str, Any]]:
+    """Return active students with assessment and attendance rollups."""
     with get_connection() as connection:
         rows = connection.execute(
             """
@@ -198,6 +208,8 @@ def list_class_students(class_id: int) -> list[dict[str, Any]]:
         item = dict(row)
         recorded = item.get("attendance_days_recorded") or 0
         present = item.get("attendance_days_present") or 0
+        # Compute the percentage once in the repository layer so every UI view
+        # shows the same attendance value.
         item["attendance_percentage"] = round((present / recorded) * 100, 1) if recorded else None
         items.append(item)
     return items
