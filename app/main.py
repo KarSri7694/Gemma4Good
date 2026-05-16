@@ -1,18 +1,4 @@
 from __future__ import annotations
-
-"""Main Streamlit application entry point.
-
-This file wires together the teacher-facing workspaces:
-- dashboard and daily Gemma analysis
-- attendance capture and class overview
-- timetable and syllabus ingestion
-- quiz generation and assessment review
-- multimodal chat with Gemma
-
-Persistent records live in repository modules and model-backed extraction lives
-in service modules. The UI layer here mostly coordinates those pieces.
-"""
-
 import atexit
 import asyncio
 import json
@@ -23,15 +9,19 @@ import threading
 from datetime import datetime, timedelta
 
 import streamlit as st
-from requests import RequestException
 
-st.set_page_config(
-    page_title="Pathshala Play",
-    page_icon="PP",
-    layout="wide",
-    initial_sidebar_state="expanded",
-    menu_items={"About": "Pathshala Play - an AI-powered classroom copilot for teachers."},
-)
+try:
+    st.set_page_config(
+        page_title="Pathshala Play",
+        page_icon="PP",
+        layout="wide",
+        initial_sidebar_state="expanded",
+        menu_items={"About": "Pathshala Play - an AI-powered classroom copilot for teachers."},
+    )
+except st.errors.StreamlitAPIException:
+    pass
+
+from requests import RequestException
 
 ROOT = Path(__file__).resolve().parent.parent
 CONVERSATION_LOG_PATH = ROOT / "conversation.txt"
