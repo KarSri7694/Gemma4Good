@@ -3,6 +3,7 @@ import json
 import os
 from pathlib import Path
 import re
+import sys
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from contextlib import AsyncExitStack
@@ -43,6 +44,11 @@ async def start_servers(config_path: str):
         print(f"Connecting to {server_name}...")
         merged_env = os.environ.copy()
         merged_env.update(_expand_env_vars(server_config.get("env") or {}))
+        command = server_config["command"]
+        # Use the current interpreter for local Python MCP servers so the
+        # subprocess sees the same site-packages installed for Streamlit.
+        if command in {"python", "python3"}:
+            command = sys.executable
         resolved_args = []
         for arg in _expand_env_vars(server_config.get("args", [])):
             if isinstance(arg, str):
@@ -54,7 +60,7 @@ async def start_servers(config_path: str):
 
         # Prepare the connection parameters
         server_params = StdioServerParameters(
-            command=server_config["command"],
+            command=command,
             args=resolved_args,
             env=merged_env
         )
